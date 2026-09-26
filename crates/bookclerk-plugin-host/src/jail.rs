@@ -207,9 +207,16 @@ pub(crate) struct GuestJail {
     pub start: Start,
     /// Native sibling jail when [`crate::GuestRuntimeKind::NativeBehindWorkerd`].
     pub guest_start: Option<Start>,
-    /// Aggregate session resource ceilings (Windows Job / Linux cgroup).
+    /// Aggregate session resource ceilings.
+    ///
+    /// Linux cgroup writes use this payload accounting. The Windows outer Job
+    /// rewrites `active_processes` through [`windows_outer_job_limits`] so the
+    /// two jail supervisors are included without changing the Linux thread cap.
     #[allow(dead_code)] // read on Windows (`SessionJob`); Linux writes limits at create.
     pub session_limits: bookclerk_sandbox::ResourceLimits,
+    /// Isolation mode from config. Required refuses a missing outer Windows Job.
+    #[allow(dead_code)] // read on Windows when the outer Job cannot be created
+    pub isolation: Isolation,
     /// Linux session cgroup leaf both siblings join (held so the host owns it).
     #[cfg(target_os = "linux")]
     #[allow(dead_code)]
@@ -358,6 +365,7 @@ impl GuestJail {
                                             ),
                                         }),
                                         session_limits,
+                                        isolation,
                                         #[cfg(target_os = "linux")]
                                         session_cgroup,
                                         package_sid: None,
@@ -427,6 +435,7 @@ impl GuestJail {
             start,
             guest_start,
             session_limits,
+            isolation,
             #[cfg(target_os = "linux")]
             session_cgroup,
             #[cfg(windows)]
@@ -737,8 +746,14 @@ fn build_spec_with_grant(
     };
     apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail, override_runtime);
     if role == JailRole::Gateway {
-        // Extra processes belong on the guest / session cap, not the gateway.
+        // Extra processes belong on the guest / outer session cap, not the gateway.
         resources.active_processes = Some(2);
+    }
+    if matches!(role, JailRole::Gateway | JailRole::Guest) {
+        // A nested Job CPU rate is a fraction of its parent. The outer session
+        // Job keeps the one-core hard cap; sibling inner Jobs keep process and
+        // memory limits only. Standalone (Combined) launches still set CPU.
+        resources.cpu_rate_percent = None;
     }
     Spec {
         label: format!("plugin:{}{label_suffix}", plugin.plugin_key().fs_id()),
@@ -843,10 +858,11 @@ fn jail_net_policy(
 /// Applies to **native and workerd** confined guests:
 ///
 /// - `memory_bytes` from grant `memoryMib` (default 512 MiB)
-/// - `active_processes` = overhead(launcher tree) + extra budget (default
-///   extra 2; native grant `extraProcesses`; workerd isolates use the default
-///   extra only). The overhead follows the spawn plan, so a native guest behind
-///   `bookclerk-workerd` budgets launcher + `workerd` + guest (3), not 1.
+/// - `active_processes` = payload overhead + extra budget (default extra 2;
+///   native grant `extraProcesses`; workerd isolates use the default extra
+///   only). Payload overhead for native-behind-workerd is 3 (gateway pair +
+///   guest). The Windows outer Job uses [`windows_outer_job_limits`] (baseline
+///   5 plus that extra) and does not feed this payload count to Linux.
 /// - `cpu_rate_percent`: **native** from grant `cpuRatePercent` (default 80);
 ///   **workerd** always uses the host default (80) so isolate budgets stay on
 ///   `cpu_ms`. `[plugins.jail]` then applies as a per-jail ceiling.
@@ -902,13 +918,39 @@ fn sibling_guest_spec_resource_limits(
     guest_spec_resource_limits(plugin, crate::GuestRuntimeKind::NativeDirect, grant)
 }
 
-/// Session Job / cgroup: same aggregate as today's combined native-behind spec.
+/// Payload session ceilings shared with the Linux cgroup.
+///
+/// Process count here is payload overhead plus extras (3 + extra for
+/// native-behind-workerd). It is **not** the Windows outer Job cap.
 fn session_resource_limits(
     plugin: &DiscoveredPlugin,
     runtime: crate::GuestRuntimeKind,
     grant: Option<&PluginGrant>,
 ) -> bookclerk_sandbox::ResourceLimits {
     guest_spec_resource_limits(plugin, runtime, grant)
+}
+
+/// Windows outer Job limits: same memory and CPU as `payload`, process cap
+/// baseline 5 plus the extra budget already applied to that payload cap.
+///
+/// Sibling inner Jobs omit CPU; this outer Job keeps it. Linux cgroup limits
+/// stay on `payload` so `pids.max` is not given the Windows process count.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn windows_outer_job_limits(
+    payload: bookclerk_sandbox::ResourceLimits,
+    runtime: crate::GuestRuntimeKind,
+) -> bookclerk_sandbox::ResourceLimits {
+    use crate::consent::{windows_session_active_processes, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT};
+
+    let extra = payload
+        .active_processes
+        .map(|abs| abs.saturating_sub(runtime.process_overhead()))
+        .unwrap_or(PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT);
+    let mut limits = payload;
+    if runtime == crate::GuestRuntimeKind::NativeBehindWorkerd {
+        limits.active_processes = Some(windows_session_active_processes(extra));
+    }
+    limits
 }
 
 /// True when this guest is the verified Bookclerk platform SQLite adapter.
@@ -1415,6 +1457,14 @@ entrypoints = ["{entrypoint}"]
         assert_eq!(gateway.active_processes, Some(2));
         // guest 1 + default extra 2
         assert_eq!(guest.active_processes, Some(3));
+        // Nested CPU would compound against the outer session Job.
+        assert_eq!(gateway.cpu_rate_percent, None);
+        assert_eq!(guest.cpu_rate_percent, None);
+        let payload = session_resource_limits(&plugin, plan.runtime, None);
+        assert_eq!(payload.active_processes, Some(5), "linux payload stays 3+2");
+        let outer = windows_outer_job_limits(payload, plan.runtime);
+        assert_eq!(outer.active_processes, Some(7), "windows outer is 5+2");
+        assert_eq!(outer.cpu_rate_percent, payload.cpu_rate_percent);
         assert_eq!(gateway.writes, vec![session.clone()]);
         assert!(guest.writes.contains(&data));
         assert!(guest.writes.contains(&scratch));
@@ -1635,9 +1685,16 @@ entrypoints = ["{entrypoint}"]
         );
         assert_eq!(gateway.active_processes, Some(2));
         assert_eq!(guest.active_processes, Some(2));
+        assert_eq!(gateway.cpu_rate_percent, None);
+        assert_eq!(guest.cpu_rate_percent, None);
         let mut session = session_resource_limits(&native, plan.runtime, None);
         apply_global_jail_resource_overrides(&mut session, &config.plugins.jail, plan.runtime);
+        // Linux payload: 3 + extra 1. Windows outer: 5 + extra 1. CPU stays outer-only.
         assert_eq!(session.active_processes, Some(4));
+        assert!(session.cpu_rate_percent.is_some());
+        let outer = windows_outer_job_limits(session, plan.runtime);
+        assert_eq!(outer.active_processes, Some(6));
+        assert_eq!(outer.cpu_rate_percent, session.cpu_rate_percent);
     }
 
     #[test]

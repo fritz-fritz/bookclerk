@@ -229,3 +229,49 @@ async fn sequential_and_concurrent_spawn_cycles_do_not_leak() {
     }
     step("20 sequential + 4 concurrent cycles left no session dirs or pids");
 }
+
+/// Required isolation must fail before either sibling starts when the outer
+/// session Job cannot be created or configured.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outer_session_job_failure_leaves_no_session_and_no_proxy() {
+    let _env = workerd_bin_lock().await;
+    let listener = Listener::bind(false).await;
+    let install = Install::new(listener.port);
+    struct ClearJobFail;
+    impl Drop for ClearJobFail {
+        fn drop(&mut self) {
+            std::env::remove_var("BOOKCLERK_TEST_FAIL_SESSION_JOB");
+        }
+    }
+    for mode in ["create", "configure"] {
+        let _clear = ClearJobFail;
+        std::env::set_var("BOOKCLERK_TEST_FAIL_SESSION_JOB", mode);
+        let plugin = install.plugin();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            PluginSession::spawn_with(
+                &plugin,
+                &install.config,
+                serde_json::json!({}),
+                HOST_SHARED_ACCOUNT,
+                &[],
+                SessionServices::default(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{mode}: spawn hung"))
+        .expect_err("required isolation must fail closed");
+        std::env::remove_var("BOOKCLERK_TEST_FAIL_SESSION_JOB");
+        let text = err.to_string();
+        assert!(text.contains("outer session Job"), "{mode}: {text}");
+        assert!(text.contains(mode), "{mode}: {text}");
+        let dirs = session_dirs_under(install.files_dir());
+        assert!(dirs.is_empty(), "{mode} left session dirs {dirs:?}");
+        assert_eq!(
+            listener.accepts(),
+            0,
+            "{mode} accepted a proxied connection"
+        );
+    }
+}

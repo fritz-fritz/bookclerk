@@ -650,10 +650,18 @@ logical CPU**; values above 100 request multi-core bandwidth up to
 `cpu.max`; Job memory is **job-wide** commit charge, matching Linux
 `memory.max`). Operator grants expose an **extra** process/thread budget
 (`extraProcesses`, default **2**) above launcher overhead (direct-native **1**,
-workerd isolate **2**, native-behind **3** split as gateway **2** + guest **1**;
-the extra budget is on the guest jail). Spec `active_processes` = overhead +
-extra (capped at 64). A Windows session Job / Linux session cgroup holds the
-aggregate `3 + extra` so the tree cannot exceed today's cap.
+workerd isolate **2**, native-behind payload **3** split as gateway **2** +
+guest **1 + extra**). Spec `active_processes` = overhead + extra (capped at
+64). The Windows **outer** session Job counts both `bookclerk-jail`
+supervisors as well, so its cap is **5 + extra** (still capped at 64). That
+outer Job is the only sibling Job that sets the CPU hard cap; the gateway and
+guest Jobs omit `cpu_rate_percent` because a nested Job rate is a fraction of
+its parent. A standalone jail (no outer Job) still sets CPU on its own Job.
+Linux `pids.max` is a thread budget and is **not** given this Windows process
+count. Creating the outer Job under `isolation = "required"` fails the spawn
+before either sibling starts. `best-effort` continues without an outer Job
+only when the kernel reports that Job control as unsupported, and the session
+records that absence.
 Workerd consent does not edit process budget (host-managed headroom). Workerd
 guests use isolate `cpu_ms` for the script budget; their jail CPU rate comes
 from the host default / `[plugins.jail]` per-jail ceiling (default **80**)

@@ -83,6 +83,10 @@ pub(crate) struct SpawnedStdio {
     #[cfg(windows)]
     #[allow(dead_code)]
     pub session_job: Option<bookclerk_sandbox::SessionJob>,
+    /// Best-effort spawn continued with no outer Job because that kernel
+    /// feature is unsupported. Required isolation fails before this is set.
+    #[cfg(windows)]
+    pub outer_job_unsupported: bool,
     /// Last lines of guest + gateway stderr, for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
     /// Files dir used to re-read `plugin-grants.json` before returning a session.
@@ -188,6 +192,8 @@ pub(crate) async fn spawn_stdio_guest(
         guest_appcontainer: jail.guest_appcontainer,
         #[cfg(windows)]
         session_job,
+        #[cfg(windows)]
+        outer_job_unsupported: jail.guest_start.is_some() && session_job.is_none(),
         stderr_tail,
         files_dir: config.paths().files_dir.clone(),
     })
@@ -281,6 +287,17 @@ async fn spawn_siblings(
         PluginError::message("native-behind-workerd jail plan is missing the session directory")
     })?;
 
+    // Outer Job before links, the proxy, or either sibling. A required failure
+    // returns with nothing left running; the caller drops profiles and the
+    // session directory.
+    #[cfg(windows)]
+    let session_job = match prepare_windows_session_job(jail, plan.runtime) {
+        Ok(job) => job,
+        Err(err) => return Err(err),
+    };
+    #[cfg(not(windows))]
+    let session_job: Option<WindowsSessionJob> = None;
+
     // Unix links are socketpairs. Windows uses two unidirectional pipes per
     // link so a pending read cannot lock a write on the same pipe. Guest RPC
     // ends stay synchronous (Rust std aborts on overlapped stdin). Proxy ends
@@ -307,11 +324,6 @@ async fn spawn_siblings(
         session = %session_dir.display(),
         "starting native-behind-workerd siblings"
     );
-
-    #[cfg(windows)]
-    let session_job = bookclerk_sandbox::SessionJob::create(&jail.session_limits).ok();
-    #[cfg(not(windows))]
-    let session_job: Option<WindowsSessionJob> = None;
 
     let mut gateway_cmd = command_for_start(&jail.start, &plan.launcher, &plan.args);
     apply_common_env(&mut gateway_cmd, plugin, id);
@@ -762,6 +774,84 @@ type WindowsSessionJob = bookclerk_sandbox::SessionJob;
 #[cfg(not(windows))]
 type WindowsSessionJob = ();
 
+/// Why creating the outer Windows session Job failed.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OuterJobFailure {
+    /// The kernel does not implement the Job feature that was requested.
+    Unsupported,
+    /// Create or configure failed for a reason other than missing support.
+    Failed,
+}
+
+/// What the host does with an outer-Job outcome.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OuterJobDecision {
+    /// Job exists and siblings may be assigned to it.
+    Present,
+    /// Best-effort / off continued and recorded that there is no outer Job.
+    AbsentUnsupported,
+    /// Required, or a failure that is not an explicit lack of support.
+    FailClosed,
+}
+
+/// Required isolation fails closed. Best-effort may continue only when the
+/// missing piece is explicitly unsupported.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decide_outer_job(
+    isolation: bookclerk_config::Isolation,
+    failure: Option<OuterJobFailure>,
+) -> OuterJobDecision {
+    match failure {
+        None => OuterJobDecision::Present,
+        Some(OuterJobFailure::Unsupported)
+            if matches!(
+                isolation,
+                bookclerk_config::Isolation::BestEffort | bookclerk_config::Isolation::Off
+            ) =>
+        {
+            OuterJobDecision::AbsentUnsupported
+        }
+        Some(_) => OuterJobDecision::FailClosed,
+    }
+}
+
+/// Create the outer session Job, or fail before either sibling starts.
+#[cfg(windows)]
+fn prepare_windows_session_job(
+    jail: &GuestJail,
+    runtime: crate::GuestRuntimeKind,
+) -> Result<Option<bookclerk_sandbox::SessionJob>> {
+    let limits = crate::jail::windows_outer_job_limits(jail.session_limits, runtime);
+    match bookclerk_sandbox::SessionJob::create(&limits) {
+        Ok(job) => Ok(Some(job)),
+        Err(err) => {
+            let failure = if err.kind() == std::io::ErrorKind::Unsupported {
+                OuterJobFailure::Unsupported
+            } else {
+                OuterJobFailure::Failed
+            };
+            match decide_outer_job(jail.isolation, Some(failure)) {
+                OuterJobDecision::Present => Err(PluginError::message(
+                    "outer session Job decision was Present after a create failure",
+                )),
+                OuterJobDecision::AbsentUnsupported => {
+                    tracing::warn!(
+                        isolation = jail.isolation.as_str(),
+                        error = %err,
+                        "outer session Job is unsupported; continuing with no outer job"
+                    );
+                    Ok(None)
+                }
+                OuterJobDecision::FailClosed => Err(PluginError::message(format!(
+                    "could not create the outer session Job ({err}); no sibling was started"
+                ))),
+            }
+        }
+    }
+}
+
 /// Keys the host must never place on the native sibling.
 #[cfg(test)]
 fn guest_env_forbidden_key(key: &str) -> bool {
@@ -958,5 +1048,34 @@ mod tests {
             .iter()
             .any(|k| k.starts_with("BOOKCLERK_WORKERD_GRANT_")));
         assert!(!keys.iter().any(|k| k.starts_with("BOOKCLERK_JAIL_")));
+    }
+
+    #[test]
+    fn outer_job_fails_closed_unless_the_gap_is_explicitly_unsupported() {
+        use bookclerk_config::Isolation;
+        assert_eq!(
+            decide_outer_job(Isolation::Required, None),
+            OuterJobDecision::Present
+        );
+        assert_eq!(
+            decide_outer_job(Isolation::Required, Some(OuterJobFailure::Unsupported)),
+            OuterJobDecision::FailClosed
+        );
+        assert_eq!(
+            decide_outer_job(Isolation::Required, Some(OuterJobFailure::Failed)),
+            OuterJobDecision::FailClosed
+        );
+        assert_eq!(
+            decide_outer_job(Isolation::BestEffort, Some(OuterJobFailure::Failed)),
+            OuterJobDecision::FailClosed
+        );
+        assert_eq!(
+            decide_outer_job(Isolation::BestEffort, Some(OuterJobFailure::Unsupported)),
+            OuterJobDecision::AbsentUnsupported
+        );
+        assert_eq!(
+            decide_outer_job(Isolation::Off, Some(OuterJobFailure::Unsupported)),
+            OuterJobDecision::AbsentUnsupported
+        );
     }
 }

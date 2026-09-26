@@ -97,8 +97,8 @@ label (`S:(ML;;NW;;;LW)`). See [plugins.md](plugins.md) (Interactive listeners).
 | | Plugins | Media |
 | --- | --- | --- |
 | Job memory (cumulative) | 512 MiB | 2 GiB |
-| Active processes | overhead + extra (direct-native 1+2=3, isolate 2+2=4, native-behind session 3+extra split gateway 2 / guest 1+extra) | 64 |
-| CPU rate | 80% of one core hard cap | uncapped |
+| Active processes | overhead + extra (direct-native 1+2=3, isolate 2+2=4, native-behind gateway 2, guest 1+extra, outer session Job 5+extra) | 64 |
+| CPU rate | 80% of one core hard cap on the outer session Job (sibling inner Jobs omit CPU so the rate is not compounded; standalone Jobs still set it) | uncapped |
 | Stderr proxy budget | 1 MiB | 16 MiB |
 | data/tmp growth (plan + side-pass) | 512 MiB each | n/a |
 | RPC timeout | kill + quarantine | n/a (stdio job) |

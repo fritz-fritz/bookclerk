@@ -61,13 +61,15 @@ impl GuestRuntimeKind {
         }
     }
 
-    /// Fixed jail occupancy of the launcher tree before any guest-owned
-    /// children or threads.
+    /// Payload occupancy before guest-owned children.
     ///
-    /// `NativeDirect`: `bookclerk-jail` execs the guest (1). `Workerd`:
-    /// `bookclerk-workerd` plus the `workerd` child (2). `NativeBehindWorkerd`:
-    /// session total of gateway (2) + guest (1) = 3. Per-jail caps are split;
-    /// the host session Job / cgroup keeps this aggregate.
+    /// `NativeDirect`: the guest (1). `Workerd`: `bookclerk-workerd` plus the
+    /// pinned `workerd` (2). `NativeBehindWorkerd`: gateway payload (2) plus
+    /// the native guest (1) = 3. This count does **not** include the two
+    /// `bookclerk-jail` supervisors. The Windows outer session Job adds those
+    /// supervisors ([`crate::consent::WINDOWS_SESSION_PROCESS_BASELINE`]); Linux
+    /// `pids.max` stays on a thread budget and must not reuse the Windows
+    /// process total.
     #[must_use]
     pub fn process_overhead(self) -> u32 {
         match self {

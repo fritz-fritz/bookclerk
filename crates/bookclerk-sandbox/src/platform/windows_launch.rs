@@ -37,8 +37,10 @@ use windows::Win32::Security::{
     PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
 };
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
@@ -344,7 +346,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     if let Err(err) = configure_job(job, &request.job) {
         let _ = CloseHandle(job);
         close_stdio();
-        return Err(err);
+        return Err(err.into_sandbox());
     }
 
     // `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` fails with ERROR_INVALID_PARAMETER
@@ -431,21 +433,34 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         &mut pi,
     );
 
-    // If JOB_LIST CreateProcess failed, rebuild attributes without it and retry
-    // suspended — measured ERROR_INVALID_HANDLE on some hosts with JOB_LIST.
+    // Capture the Win32 code before any cleanup API can replace `GetLastError`.
+    let mut job_list_failure = None;
     let use_job_list = if cp.is_err() && use_job_list {
+        let err = cp.expect_err("checked is_err");
+        let rendered = render_win_error(&err);
         tracing::warn!(
-            "CreateProcessW with JOB_LIST failed ({}); retrying CREATE_SUSPENDED",
-            std::io::Error::last_os_error()
+            stage = "CreateProcessW(JOB_LIST)",
+            win32 = rendered.win32,
+            hresult = rendered.hresult,
+            "CreateProcessW with JOB_LIST failed; retrying CREATE_SUSPENDED"
         );
+        job_list_failure = Some(rendered);
         drop(attr);
         let mut retry_attrs = match prepare_attrs(false) {
             Ok(a) => a,
             Err(err) => {
+                let diag = query_job_diag(job, None);
                 let _ = CloseHandle(job);
                 cleanup_handles(&[child_stdin, child_stdout, child_stderr]);
                 cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
-                return Err(err);
+                let prior = job_list_failure
+                    .as_ref()
+                    .map(|e| e.display_code())
+                    .unwrap_or_else(|| "unknown".into());
+                return Err(launch_err(
+                    "CreateProcessW(JOB_LIST)",
+                    &format!("original {prior}; attribute rebuild failed: {err}; {diag}"),
+                ));
             }
         };
         si_ex.lpAttributeList = retry_attrs.as_mut_ptr();
@@ -471,6 +486,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     } else {
         use_job_list
     };
+    let create_failure = cp.err().map(|err| render_win_error(&err));
 
     // Child pipe / extra ends must not stay open in the parent.
     close_unique_handles(
@@ -481,20 +497,26 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     drop(attr);
     drop(owned_caps);
 
-    if cp.is_err() {
+    if let Some(err) = create_failure {
+        let diag = query_job_diag(job, None);
         let _ = CloseHandle(job);
         cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
-        return Err(launch_err(
-            "CreateProcessW",
-            &format!(
-                "AppContainer launch failed: {}",
-                std::io::Error::last_os_error()
+        let stage = "CreateProcessW(CREATE_SUSPENDED)";
+        let detail = match job_list_failure {
+            Some(prior) => format!(
+                "JOB_LIST failed {}; suspended retry failed {}; {diag}",
+                prior.display_code(),
+                err.display_code()
             ),
-        ));
+            None => format!("failed {}; {diag}", err.display_code()),
+        };
+        return Err(launch_err(stage, &detail));
     }
 
     // From here, every failure must TerminateProcess + close all handles.
+    // Job membership and quotas are read before the job handle is closed.
     let fail_after_create = |stage: &str, detail: &str| -> SandboxError {
+        let diag = query_job_diag(job, Some(pi.hProcess));
         unsafe {
             let _ = TerminateProcess(pi.hProcess, 1);
             let _ = WaitForSingleObject(pi.hProcess, 5_000);
@@ -503,7 +525,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
             let _ = CloseHandle(job);
             cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
         }
-        launch_err(stage, detail)
+        launch_err(stage, &format!("{detail}; {diag}"))
     };
 
     if force_assign_fail {
@@ -555,12 +577,53 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     })
 }
 
+/// Why `SetInformationJobObject` refused a limit.
+enum JobConfigError {
+    /// The kernel does not implement this Job control.
+    Unsupported(String),
+    /// The call failed for a reason other than missing support.
+    Failed(String),
+}
+
+impl JobConfigError {
+    fn from_win(stage: &str, err: &windows::core::Error) -> Self {
+        let rendered = render_win_error(err);
+        let detail = format!("{stage}: {}", rendered.display_code());
+        if rendered.unsupported {
+            Self::Unsupported(detail)
+        } else {
+            Self::Failed(detail)
+        }
+    }
+
+    fn into_sandbox(self) -> SandboxError {
+        match self {
+            Self::Unsupported(detail) | Self::Failed(detail) => {
+                launch_err("configure_job", &detail)
+            }
+        }
+    }
+
+    fn into_io(self) -> std::io::Error {
+        match self {
+            Self::Unsupported(detail) => {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, detail)
+            }
+            Self::Failed(detail) => std::io::Error::other(detail),
+        }
+    }
+}
+
 /// Applies memory, CPU rate, and process limits plus kill-on-close to `job`.
+///
+/// CPU is applied only when `limits.cpu_rate_percent` is set. Sibling inner
+/// Jobs omit it so a nested rate is not a fraction of the outer session cap.
 ///
 /// # Errors
 ///
-/// Returns [`SandboxError::Backend`] when `SetInformationJobObject` fails.
-fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), SandboxError> {
+/// Returns [`JobConfigError::Unsupported`] when the kernel rejects the control
+/// as unimplemented, and [`JobConfigError::Failed`] for every other failure.
+fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), JobConfigError> {
     unsafe {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -579,7 +642,7 @@ fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), SandboxE
             &info as *const _ as *const _,
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         )
-        .map_err(|err| launch_err("SetInformationJobObject(ext)", &err.to_string()))?;
+        .map_err(|err| JobConfigError::from_win("SetInformationJobObject(ext)", &err))?;
 
         if let Some(percent) = limits.cpu_rate_percent {
             let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
@@ -598,7 +661,7 @@ fn configure_job(job: HANDLE, limits: &JobResourceLimits) -> Result<(), SandboxE
                 &cpu as *const _ as *const _,
                 size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
             )
-            .map_err(|err| launch_err("SetInformationJobObject(cpu)", &err.to_string()))?;
+            .map_err(|err| JobConfigError::from_win("SetInformationJobObject(cpu)", &err))?;
         }
     }
     Ok(())
@@ -886,6 +949,155 @@ fn build_env_block(env: &[(OsString, OsString)]) -> Vec<u16> {
     block
 }
 
+/// CPU-rate control block read back from a Job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionCpuControl {
+    /// `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP` is set.
+    pub hard_cap: bool,
+    /// Raw Job `CpuRate` (cycles per 10_000 of the whole machine).
+    pub cpu_rate: u32,
+}
+
+/// Win32 code captured from a `windows::core::Error` before later API calls.
+struct RenderedWinError {
+    /// Win32 code when the HRESULT uses `FACILITY_WIN32`, otherwise the bits.
+    win32: u32,
+    /// `HRESULT` bits from [`windows::core::Error::code`].
+    hresult: i32,
+    /// Whether the code is an explicit "not implemented" failure.
+    unsupported: bool,
+}
+
+impl RenderedWinError {
+    fn display_code(&self) -> String {
+        format!("win32={} hresult={:#010x}", self.win32, self.hresult as u32)
+    }
+}
+
+/// `FACILITY_WIN32` in an HRESULT.
+const FACILITY_WIN32: u32 = 7;
+/// `ERROR_NOT_SUPPORTED`.
+const WIN32_NOT_SUPPORTED: u32 = 50;
+/// `ERROR_INVALID_FUNCTION`.
+const WIN32_INVALID_FUNCTION: u32 = 1;
+/// `ERROR_CALL_NOT_IMPLEMENTED`.
+const WIN32_CALL_NOT_IMPLEMENTED: u32 = 120;
+
+fn render_win_error(err: &windows::core::Error) -> RenderedWinError {
+    let hresult = err.code().0;
+    let bits = hresult as u32;
+    let facility = (bits >> 16) & 0x1fff;
+    let win32 = if facility == FACILITY_WIN32 {
+        bits & 0xffff
+    } else {
+        bits
+    };
+    let unsupported = matches!(
+        win32,
+        WIN32_NOT_SUPPORTED | WIN32_INVALID_FUNCTION | WIN32_CALL_NOT_IMPLEMENTED
+    );
+    RenderedWinError {
+        win32,
+        hresult,
+        unsupported,
+    }
+}
+
+/// Job membership and quota snapshot. No command line or environment.
+fn query_job_diag(job: HANDLE, process: Option<HANDLE>) -> String {
+    let active = query_active_processes(job)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|err| format!("error:{err}"));
+    let limit = query_active_process_limit(job)
+        .map(|n| match n {
+            Some(v) => v.to_string(),
+            None => "unset".into(),
+        })
+        .unwrap_or_else(|err| format!("error:{err}"));
+    let member = match process {
+        Some(process) => match query_in_job(job, process) {
+            Ok(true) => "yes".into(),
+            Ok(false) => "no".into(),
+            Err(err) => format!("error:{err}"),
+        },
+        None => "n/a".into(),
+    };
+    format!("job active={active} limit={limit} member={member}")
+}
+
+fn query_active_processes(job: HANDLE) -> Result<u32, String> {
+    unsafe {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+        QueryInformationJobObject(
+            Some(job),
+            JobObjectBasicAccountingInformation,
+            &mut info as *mut _ as *mut _,
+            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            None,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(info.ActiveProcesses)
+    }
+}
+
+fn query_active_process_limit(job: HANDLE) -> Result<Option<u32>, String> {
+    unsafe {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        QueryInformationJobObject(
+            Some(job),
+            JobObjectExtendedLimitInformation,
+            &mut info as *mut _ as *mut _,
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            None,
+        )
+        .map_err(|err| err.to_string())?;
+        let flags = info.BasicLimitInformation.LimitFlags;
+        if (flags & JOB_OBJECT_LIMIT_ACTIVE_PROCESS) == JOB_OBJECT_LIMIT_ACTIVE_PROCESS {
+            Ok(Some(info.BasicLimitInformation.ActiveProcessLimit))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn query_in_job(job: HANDLE, process: HANDLE) -> Result<bool, String> {
+    let mut inside = BOOL(0);
+    unsafe {
+        IsProcessInJob(job, Some(process), &mut inside).map_err(|err| err.to_string())?;
+    }
+    Ok(inside.as_bool())
+}
+
+fn query_cpu_control(job: HANDLE) -> Result<Option<SessionCpuControl>, String> {
+    unsafe {
+        let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
+        if let Err(err) = QueryInformationJobObject(
+            Some(job),
+            JobObjectCpuRateControlInformation,
+            &mut cpu as *mut _ as *mut _,
+            size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+            None,
+        ) {
+            let rendered = render_win_error(&err);
+            if rendered.unsupported {
+                return Ok(None);
+            }
+            return Err(rendered.display_code());
+        }
+        let flags = cpu.ControlFlags;
+        let enabled =
+            (flags & JOB_OBJECT_CPU_RATE_CONTROL_ENABLE) == JOB_OBJECT_CPU_RATE_CONTROL_ENABLE;
+        if !enabled {
+            return Ok(None);
+        }
+        Ok(Some(SessionCpuControl {
+            hard_cap: (flags & JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP)
+                == JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+            cpu_rate: cpu.Anonymous.CpuRate,
+        }))
+    }
+}
+
 /// Formats an AppContainer launch failure as [`SandboxError::Backend`].
 fn launch_err(stage: &str, detail: &str) -> SandboxError {
     SandboxError::Backend {
@@ -908,12 +1120,42 @@ pub struct SessionJob {
 }
 
 impl SessionJob {
-    /// Create a kill-on-close Job with `limits` (best-effort when a field is unset).
+    /// Create a kill-on-close Job with `limits`.
+    ///
+    /// `BOOKCLERK_TEST_FAIL_SESSION_JOB` injects `create`, `configure`, or
+    /// `unsupported` before any sibling could be assigned. Those failures do
+    /// not leave a job handle behind.
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when `CreateJobObjectW` or Job configuration fails.
+    /// Returns [`std::io::ErrorKind::Unsupported`] when Job configuration is
+    /// explicitly unsupported. Every other create or configure failure is a
+    /// generic I/O error. Callers under required isolation must fail closed.
     pub fn create(limits: &crate::ResourceLimits) -> std::io::Result<Self> {
+        if let Some(mode) = std::env::var_os("BOOKCLERK_TEST_FAIL_SESSION_JOB") {
+            match mode.to_string_lossy().as_ref() {
+                "unsupported" => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "BOOKCLERK_TEST_FAIL_SESSION_JOB=unsupported",
+                    ));
+                }
+                "create" => {
+                    return Err(std::io::Error::other(
+                        "BOOKCLERK_TEST_FAIL_SESSION_JOB=create",
+                    ));
+                }
+                "configure" => {
+                    let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+                        .map_err(std::io::Error::other)?;
+                    let _ = unsafe { CloseHandle(job) };
+                    return Err(std::io::Error::other(
+                        "BOOKCLERK_TEST_FAIL_SESSION_JOB=configure",
+                    ));
+                }
+                _ => {}
+            }
+        }
         let job =
             unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(std::io::Error::other)?;
         let job_limits = JobResourceLimits {
@@ -923,11 +1165,78 @@ impl SessionJob {
         };
         if let Err(err) = configure_job(job, &job_limits) {
             let _ = unsafe { CloseHandle(job) };
-            return Err(std::io::Error::other(err.to_string()));
+            return Err(err.into_io());
         }
         Ok(Self {
             handle: job.0 as isize,
         })
+    }
+
+    /// Active processes currently in this Job, including nested child Jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `QueryInformationJobObject` fails.
+    pub fn active_process_count(&self) -> std::io::Result<u32> {
+        query_active_processes(self.as_handle()).map_err(std::io::Error::other)
+    }
+
+    /// Configured `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` value, when that limit is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `QueryInformationJobObject` fails.
+    pub fn active_process_limit(&self) -> std::io::Result<Option<u32>> {
+        query_active_process_limit(self.as_handle()).map_err(std::io::Error::other)
+    }
+
+    /// Whether `process` is a member of this Job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `IsProcessInJob` fails.
+    pub fn contains_process(&self, process: RawHandle) -> std::io::Result<bool> {
+        let mut inside = BOOL(0);
+        unsafe {
+            IsProcessInJob(self.as_handle(), Some(HANDLE(process)), &mut inside)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(inside.as_bool())
+    }
+
+    /// CPU hard-cap currently configured on this Job.
+    ///
+    /// `None` means no CPU-rate control is enabled (sibling inner Jobs).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `QueryInformationJobObject` fails.
+    pub fn cpu_control(&self) -> std::io::Result<Option<SessionCpuControl>> {
+        query_cpu_control(self.as_handle()).map_err(std::io::Error::other)
+    }
+
+    /// Total user + kernel time charged to this Job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `QueryInformationJobObject` fails.
+    pub fn cpu_time(&self) -> std::io::Result<std::time::Duration> {
+        unsafe {
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+            QueryInformationJobObject(
+                Some(self.as_handle()),
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut _,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )
+            .map_err(std::io::Error::other)?;
+            let ticks = info
+                .TotalUserTime
+                .saturating_add(info.TotalKernelTime)
+                .max(0) as u64;
+            Ok(std::time::Duration::from_nanos(ticks.saturating_mul(100)))
+        }
     }
 
     /// Assign an already-started process (typically `bookclerk-jail.exe`).
@@ -984,5 +1293,164 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].0, stdin.0);
         assert_eq!(list[1].0, stderr.0);
+    }
+
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::Mutex;
+
+    use super::{launch_appcontainer_guest, LaunchRequest, SessionJob};
+    use crate::ResourceLimits;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn limits(active: u32, cpu: Option<u32>) -> ResourceLimits {
+        ResourceLimits {
+            memory_bytes: None,
+            cpu_rate_percent: cpu,
+            active_processes: Some(active),
+        }
+    }
+
+    fn comspec() -> String {
+        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
+    }
+
+    fn spawn_linger() -> std::process::Child {
+        std::process::Command::new(comspec())
+            .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn linger")
+    }
+
+    /// Outer caps 5, 6, and 7 are the Windows baseline plus extras 0, 1, and 2.
+    #[test]
+    fn session_job_enforces_active_process_cap_and_keeps_one_cpu_limit() {
+        for cap in [5_u32, 6, 7] {
+            let job = SessionJob::create(&limits(cap, Some(80))).expect("create job");
+            assert_eq!(job.active_process_limit().expect("limit"), Some(cap));
+            let cpu = job.cpu_control().expect("cpu query").expect("cpu set");
+            assert!(cpu.hard_cap);
+            assert_eq!(
+                cpu.cpu_rate,
+                crate::windows_job_cpu_rate(80, crate::host_logical_cpus())
+            );
+            let mut children = Vec::new();
+            for _ in 0..cap {
+                let child = spawn_linger();
+                job.assign(child.as_raw_handle())
+                    .unwrap_or_else(|err| panic!("assign within cap {cap}: {err}"));
+                assert!(job.contains_process(child.as_raw_handle()).expect("member"));
+                children.push(child);
+            }
+            assert_eq!(job.active_process_count().expect("count"), cap);
+            let extra = spawn_linger();
+            let err = job
+                .assign(extra.as_raw_handle())
+                .expect_err("process past the cap");
+            let text = err.to_string().to_ascii_lowercase();
+            assert!(
+                text.contains("denied") || text.contains("access"),
+                "cap {cap} next assign: {err}"
+            );
+            drop(extra);
+            drop(job);
+            for mut child in children {
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn job_without_cpu_rate_does_not_enable_cpu_control() {
+        let job = SessionJob::create(&limits(2, None)).expect("create");
+        assert!(job.cpu_control().expect("query").is_none());
+    }
+
+    #[test]
+    fn injected_session_job_failures_do_not_return_a_job() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        for (mode, unsupported) in [
+            ("create", false),
+            ("configure", false),
+            ("unsupported", true),
+        ] {
+            std::env::set_var("BOOKCLERK_TEST_FAIL_SESSION_JOB", mode);
+            let err = match SessionJob::create(&limits(5, Some(80))) {
+                Ok(_) => panic!("{mode} returned a job"),
+                Err(err) => err,
+            };
+            if unsupported {
+                assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
+            } else {
+                assert_ne!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
+            }
+            assert!(err.to_string().contains(mode), "{err}");
+        }
+        std::env::remove_var("BOOKCLERK_TEST_FAIL_SESSION_JOB");
+    }
+
+    #[test]
+    fn create_process_failure_preserves_the_original_win32_code() {
+        let missing = std::env::temp_dir().join("bookclerk-missing-launch-exe.exe");
+        let err = launch_appcontainer_guest(LaunchRequest {
+            exe: &missing,
+            cmdline: "secret-command-line-must-not-leak".into(),
+            cwd: std::env::temp_dir(),
+            env: vec![(
+                std::ffi::OsString::from("SECRET_ENV"),
+                std::ffi::OsString::from("secret-value"),
+            )],
+            sec: None,
+            job: super::JobResourceLimits {
+                memory_bytes: None,
+                cpu_rate_percent: None,
+                active_processes: Some(2),
+            },
+            extra_handles: Vec::new(),
+            explicit_stdin: None,
+            explicit_stdout: None,
+        })
+        .expect_err("missing executable");
+        let text = err.to_string();
+        assert!(text.contains("CreateProcessW"), "{text}");
+        assert!(
+            text.contains("win32=2") || text.contains("win32=3"),
+            "{text}"
+        );
+        assert!(text.contains("job active="), "{text}");
+        assert!(!text.contains("secret-command-line"), "{text}");
+        assert!(!text.contains("secret-value"), "{text}");
+        assert!(!text.contains("SECRET_ENV"), "{text}");
+    }
+
+    #[test]
+    fn cpu_hard_cap_bounds_a_short_burn() {
+        let job = SessionJob::create(&limits(2, Some(10))).expect("create");
+        let control = job.cpu_control().expect("cpu").expect("enabled");
+        assert!(control.hard_cap);
+        assert_eq!(
+            control.cpu_rate,
+            crate::windows_job_cpu_rate(10, crate::host_logical_cpus())
+        );
+        let mut child = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$sw=[Diagnostics.Stopwatch]::StartNew(); while($sw.ElapsedMilliseconds -lt 1000){}",
+            ])
+            .spawn()
+            .expect("powershell");
+        job.assign(child.as_raw_handle()).expect("assign burner");
+        let _ = child.wait().expect("wait burner");
+        let cpu = job.cpu_time().expect("cpu time");
+        assert!(
+            cpu < std::time::Duration::from_millis(450),
+            "10% of one core over ~1s wall exceeded tolerance: {cpu:?}"
+        );
+        assert!(
+            cpu > std::time::Duration::from_millis(15),
+            "burner did not accumulate CPU time: {cpu:?}"
+        );
     }
 }
