@@ -120,8 +120,9 @@ pub struct Spec {
     /// `None` (default, omitted on the wire) keeps the historical rule: bind
     /// and connect under every writable path. `Some(dirs)` allows UDS only in
     /// those directories (`Some([])` grants none). The native-behind-workerd
-    /// gateway sets the host-chosen session directory; the Deny guest sets
-    /// `Some([])`.
+    /// gateway sets the host-chosen session directory. `build_spec_with_grant`
+    /// starts the Deny guest at `Some([])`; the host then replaces that with
+    /// the guest's private IPC directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unix_socket_dirs: Option<Vec<PathBuf>>,
 }

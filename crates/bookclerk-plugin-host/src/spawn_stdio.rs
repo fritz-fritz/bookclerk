@@ -100,6 +100,10 @@ pub(crate) struct SpawnedStdio {
     #[cfg(target_os = "linux")]
     #[allow(dead_code)] // ownership is the Drop impl; nothing else reads the path
     pub session_cgroup: Option<crate::jail::SessionCgroup>,
+    /// Guest pathname-socket directory. Drop removes it.
+    #[cfg(unix)]
+    #[allow(dead_code)] // ownership is the Drop impl; the session clones the path
+    pub guest_ipc: Option<crate::jail::GuestIpcDir>,
     /// Host-owned ACL rollback for this session's package SIDs.
     #[cfg(windows)]
     pub acl_journal: AclJournal,
@@ -202,6 +206,8 @@ pub(crate) async fn spawn_stdio_guest(
     let outer_job_unsupported = jail.guest_start.is_some() && parts.session_job.is_none();
     #[cfg(target_os = "linux")]
     let session_cgroup = jail.session_cgroup.take();
+    #[cfg(unix)]
+    let guest_ipc = jail.guest_ipc.take();
 
     Ok(SpawnedStdio {
         id,
@@ -233,6 +239,8 @@ pub(crate) async fn spawn_stdio_guest(
         identities: parts.identities,
         #[cfg(target_os = "linux")]
         session_cgroup,
+        #[cfg(unix)]
+        guest_ipc,
         #[cfg(windows)]
         acl_journal,
         stderr_tail,
@@ -380,6 +388,10 @@ async fn spawn_siblings(
     let mut guest_cmd = command_for_start(guest_start, backend, &[]);
     apply_common_env(&mut guest_cmd, plugin, id);
     apply_temp_and_home(&mut guest_cmd, &jail.scratch, &jail.data);
+    #[cfg(unix)]
+    if let Some(dir) = jail.guest_ipc.as_ref().and_then(|ipc| ipc.path()) {
+        guest_cmd.env(bookclerk_plugin_sdk::GUEST_IPC_DIR_ENV, dir);
+    }
     apply_spec_env(&mut guest_cmd, guest_start)?;
     for (key, value) in extra_env {
         guest_cmd.env(*key, value);

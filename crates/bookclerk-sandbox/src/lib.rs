@@ -27,10 +27,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+mod guest_ipc;
 mod link;
 mod platform;
 mod spawn_path;
 mod spec;
+
+#[cfg(unix)]
+pub use guest_ipc::{create_guest_ipc_dir, ensure_guest_ipc_fits, MACOS_SUN_PATH_CAPACITY};
 
 pub use link::{
     DuplexHalf, DuplexLink, JailHandoff, JailHandoffExtra, LinkSpec, LinkSpecError, StdioEnds,

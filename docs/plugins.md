@@ -631,8 +631,14 @@ stack (Audible LoginServer). `loginStart` carries `callback_ipc` +
 
 On Windows the named pipe is created with a Package-SID DACL (plus SYSTEM /
 Administrators / Creator Owner) and a Low mandatory integrity label so the
-AppContainer guest can open it; remote clients are rejected. Unix sockets stay
-mode `0600` under the plugin scratch dir.
+AppContainer guest can open it; remote clients are rejected. On Unix the host
+creates one mode `0700` directory, short enough that `{dir}/.s.PGSQL.<port>`
+fits in a macOS `sockaddr_un` (104-byte `sun_path`). That directory is the
+guest's only pathname-socket grant and a write; `/tmp` itself and the gateway
+session directory are not. The OAuth callback socket is `cb.sock` in that
+directory. Linux Postgres still binds through `/proc/self/fd`; macOS Postgres
+binds in the same directory. A path that does not fit fails with the length
+and the directory that was too long.
 
 This is required on Windows AppContainer (host↔guest loopback is blocked even
 with Full caps / CheckNetIsolation) and is used on all OSes for a uniform

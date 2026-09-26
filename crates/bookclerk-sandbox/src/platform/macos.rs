@@ -197,7 +197,8 @@ fn build_profile(policy: &Policy) -> String {
     // `unix_socket_dirs = None` keeps the historical writable-path rule so
     // isolate workerd (`granted.sock` under scratch) stays green until the
     // host sets an explicit list. `Some(dirs)` is the sibling-sandbox contract:
-    // the gateway names its session directory, the Deny guest names nothing.
+    // the gateway names its session directory, and the Deny guest names only
+    // its private IPC directory (OAuth callback and the Postgres mediator).
     let uds = match policy.unix_socket_dirs_opt() {
         Some(dirs) => crate::resolve_all(dirs.iter().map(std::path::PathBuf::as_path)),
         None => writes.clone(),

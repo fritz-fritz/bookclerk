@@ -225,6 +225,11 @@ pub(crate) struct GuestJail {
     /// taken ownership for the life of the vat.
     #[cfg(target_os = "linux")]
     pub session_cgroup: Option<SessionCgroup>,
+    /// Private pathname-socket directory for the native guest.
+    ///
+    /// Drop removes it unless the host has taken ownership for the vat.
+    #[cfg(unix)]
+    pub guest_ipc: Option<GuestIpcDir>,
     /// AppContainer Package SID of the native guest (callback proxy DACL).
     #[cfg(windows)]
     pub package_sid: Option<String>,
@@ -268,6 +273,36 @@ impl Drop for SessionCgroup {
                     "could not remove the session cgroup"
                 );
             }
+        }
+    }
+}
+
+/// Mode `0700` directory the guest may use for pathname sockets.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct GuestIpcDir {
+    /// Canonical directory. `None` after Drop has taken it.
+    path: Option<PathBuf>,
+}
+
+#[cfg(unix)]
+impl GuestIpcDir {
+    /// Own `path` until this value is dropped.
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Directory granted on the guest write list and `unix_socket_dirs`.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GuestIpcDir {
+    fn drop(&mut self) {
+        if let Some(dir) = self.path.take() {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 }
@@ -384,6 +419,23 @@ impl GuestJail {
             .and_then(|cgroup| cgroup.path().map(Path::to_path_buf));
         #[cfg(not(target_os = "linux"))]
         let cgroup_dir = None;
+        #[cfg(unix)]
+        let guest_ipc = if siblings {
+            match bookclerk_sandbox::create_guest_ipc_dir() {
+                Ok(path) => Some(GuestIpcDir::new(path)),
+                Err(err) => {
+                    return Err(PluginError::message(format!(
+                        "could not create the guest IPC directory: {err}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let ipc_dir = guest_ipc.as_ref().and_then(GuestIpcDir::path);
+        #[cfg(not(unix))]
+        let ipc_dir: Option<&Path> = None;
         #[cfg(windows)]
         let mut package_sid = None;
         #[cfg(windows)]
@@ -402,6 +454,7 @@ impl GuestJail {
                 grant.as_ref(),
                 cgroup_dir.clone(),
                 siblings,
+                ipc_dir,
             )?,
             Isolation::Required | Isolation::BestEffort => {
                 let enforcement = if isolation == Isolation::Required {
@@ -480,6 +533,7 @@ impl GuestJail {
                             guest_profile,
                             cgroup_dir,
                             siblings,
+                            ipc_dir,
                         )
                     }
                     Err(reason)
@@ -512,6 +566,8 @@ impl GuestJail {
             isolation,
             #[cfg(target_os = "linux")]
             session_cgroup,
+            #[cfg(unix)]
+            guest_ipc,
             #[cfg(windows)]
             package_sid,
             #[cfg(windows)]
@@ -540,7 +596,9 @@ fn plan_isolation_off(
     grant: Option<&PluginGrant>,
     cgroup_dir: Option<PathBuf>,
     siblings: bool,
+    ipc_dir: Option<&Path>,
 ) -> Result<(Start, Option<Start>)> {
+    let _ = ipc_dir;
     if windows_needs_jail(siblings) {
         let launcher = resolve_launcher(config, Isolation::Off).map_err(|reason| {
             PluginError::message(format!(
@@ -562,6 +620,7 @@ fn plan_isolation_off(
             None,
             cgroup_dir,
             siblings,
+            ipc_dir,
         ));
     }
     Ok((
@@ -572,6 +631,17 @@ fn plan_isolation_off(
             reason: "[plugins].isolation = off".to_string(),
         }),
     ))
+}
+
+/// Grant `dir` as the guest's only pathname-socket directory.
+///
+/// The directory is also a write so the guest can create the socket node.
+/// `/tmp` and the gateway session directory stay off both lists.
+fn apply_guest_ipc(spec: &mut Spec, dir: &Path) {
+    if !spec.writes.iter().any(|path| path == dir) {
+        spec.writes.push(dir.to_path_buf());
+    }
+    spec.unix_socket_dirs = Some(vec![dir.to_path_buf()]);
 }
 
 /// Confined gateway (and optional guest) starts sharing one session cgroup.
@@ -590,6 +660,7 @@ fn confined_starts(
     guest_profile: Option<String>,
     cgroup_dir: Option<PathBuf>,
     siblings: bool,
+    ipc_dir: Option<&Path>,
 ) -> (Start, Option<Start>) {
     let gateway = Start::Confined {
         launcher: launcher.clone(),
@@ -611,9 +682,8 @@ fn confined_starts(
             cgroup_dir.clone(),
         )),
     };
-    let guest = siblings.then(|| Start::Confined {
-        launcher,
-        spec: Box::new(build_spec_with_grant(
+    let guest = siblings.then(|| {
+        let mut spec = build_spec_with_grant(
             plugin,
             spawn,
             config,
@@ -625,7 +695,14 @@ fn confined_starts(
             guest_profile,
             grant,
             cgroup_dir,
-        )),
+        );
+        if let Some(dir) = ipc_dir {
+            apply_guest_ipc(&mut spec, dir);
+        }
+        Start::Confined {
+            launcher,
+            spec: Box::new(spec),
+        }
     });
     (gateway, guest)
 }
@@ -1549,6 +1626,70 @@ entrypoints = ["{entrypoint}"]
         );
         assert_eq!(guest.unix_socket_dirs.as_deref(), Some([].as_slice()));
         assert!(!gateway.reads.contains(&helpers.path().to_path_buf()));
+    }
+
+    /// Production confined guests receive one short IPC directory, not `/tmp`
+    /// and not the gateway session directory.
+    #[cfg(unix)]
+    #[test]
+    fn planned_guest_pathname_sockets_are_only_the_private_ipc_dir() {
+        let files = tempfile::tempdir().expect("tempdir");
+        let install = tempfile::tempdir().expect("tempdir");
+        let helpers = tempfile::tempdir().expect("tempdir");
+        let mut config = config_at(files.path());
+        config.plugins.isolation = Isolation::Required;
+        let plugin = plugin_at(install.path(), "sqlite", JailNetworkNeed::None);
+        let plan = fronted(&plugin, helpers.path());
+        config.plugins.jail_bin = Some(helpers.path().join("bookclerk-jail"));
+
+        let jail = GuestJail::plan(&config, &plugin, &plan).expect("plan");
+        let ipc = jail
+            .guest_ipc
+            .as_ref()
+            .and_then(GuestIpcDir::path)
+            .expect("guest ipc dir")
+            .to_path_buf();
+        bookclerk_sandbox::ensure_guest_ipc_fits(&ipc).expect("sockaddr_un");
+        assert_ne!(ipc, std::path::Path::new("/tmp"));
+        assert_ne!(ipc, std::path::Path::new("/private/tmp"));
+
+        let Start::Confined { spec, .. } = jail.guest_start.as_ref().expect("guest start") else {
+            panic!("guest must be confined under required isolation");
+        };
+        assert_eq!(spec.net, NetPolicy::Deny);
+        assert_eq!(
+            spec.unix_socket_dirs.as_deref(),
+            Some(std::slice::from_ref(&ipc))
+        );
+        assert!(spec.writes.iter().any(|path| path == &ipc));
+        assert!(
+            !spec.writes.iter().any(|path| {
+                path == std::path::Path::new("/tmp") || path == std::path::Path::new("/private/tmp")
+            }),
+            "guest writes must not include /tmp: {:?}",
+            spec.writes
+        );
+        let session = jail.session_dir.clone().expect("session dir");
+        assert!(!spec.writes.iter().any(|path| path == &session));
+        assert!(spec
+            .unix_socket_dirs
+            .as_ref()
+            .is_some_and(|dirs| !dirs.iter().any(|path| path == &session)));
+
+        let Start::Confined { spec: gateway, .. } = &jail.start else {
+            panic!("gateway must be confined under required isolation");
+        };
+        assert_eq!(
+            gateway.unix_socket_dirs.as_deref(),
+            Some(std::slice::from_ref(&session))
+        );
+        assert!(!gateway.writes.iter().any(|path| path == &ipc));
+
+        drop(jail);
+        assert!(
+            !ipc.exists(),
+            "dropping the jail removes the guest IPC directory"
+        );
     }
 
     #[test]

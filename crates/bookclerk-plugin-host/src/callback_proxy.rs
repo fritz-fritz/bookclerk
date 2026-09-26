@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use bookclerk_plugin_sdk::TunnelHost;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+#[cfg(windows)]
 use uuid::Uuid;
 
 use crate::{PluginError, Result};
@@ -94,6 +95,26 @@ impl Drop for CallbackProxy {
     }
 }
 
+/// `path` does not fit in `sockaddr_un`. The message names the length and the directory.
+#[cfg(unix)]
+fn unix_socket_path_too_long(path: &Path) -> Option<String> {
+    let capacity = if cfg!(target_os = "macos") {
+        bookclerk_sandbox::MACOS_SUN_PATH_CAPACITY
+    } else {
+        108
+    };
+    let len = path.as_os_str().len();
+    if len >= capacity {
+        let dir = path.parent().unwrap_or(path);
+        Some(format!(
+            "callback socket path length {len} does not fit sockaddr_un capacity {capacity}; directory {} is too long",
+            dir.display()
+        ))
+    } else {
+        None
+    }
+}
+
 #[cfg(unix)]
 /// Binds a 0600 unix socket under `scratch` and forwards accepted TCP streams through it.
 async fn start_unix(
@@ -105,7 +126,12 @@ async fn start_unix(
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
-    let path = scratch.join(format!("oauth-cb-{}.sock", Uuid::new_v4()));
+    // `cb.sock` is shorter than `.s.PGSQL.65535`, so a directory that passed
+    // the macOS `sockaddr_un` check can hold this socket too.
+    let path = scratch.join("cb.sock");
+    if let Some(err) = unix_socket_path_too_long(&path) {
+        return Err(PluginError::message(err));
+    }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).map_err(|err| {
         PluginError::message(format!("callback Unix bind {}: {err}", path.display()))

@@ -33,6 +33,13 @@ pub const SOCKET_PROXY_WRITE_ENV: &str = "BOOKCLERK_SOCKET_PROXY_WRITE";
 /// through to `socket(AF_INET)`.
 pub const NESTED_NATIVE_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 
+/// Host-created directory for guest pathname sockets.
+///
+/// The native-behind-workerd guest may bind and connect Unix sockets only in
+/// this directory (OAuth callback and the macOS Postgres mediator). Linux
+/// Postgres still splices through `/proc/self/fd`. Unset on Windows.
+pub const GUEST_IPC_DIR_ENV: &str = "BOOKCLERK_GUEST_IPC_DIR";
+
 /// True when [`NESTED_NATIVE_JAIL_ENV`] is `1`.
 #[must_use]
 pub fn nested_native_jail_requested() -> bool {

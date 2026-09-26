@@ -557,6 +557,9 @@ pub struct PluginSession {
     grant: crate::PluginGrant,
     /// Guest TMPDIR.
     scratch: std::path::PathBuf,
+    /// Private pathname-socket directory for this native guest.
+    #[cfg(unix)]
+    guest_ipc_dir: Option<std::path::PathBuf>,
     /// Spawn config JSON captured at spawn.
     spawn_config: Value,
     /// Cancelled when effective authority for this PluginKey changes.
@@ -672,6 +675,11 @@ impl PluginSession {
         let alias = spawned.alias.clone();
         let data = spawned.data.clone();
         let scratch = spawned.scratch.clone();
+        #[cfg(unix)]
+        let guest_ipc_dir = spawned
+            .guest_ipc
+            .as_ref()
+            .and_then(|dir| dir.path().map(std::path::Path::to_path_buf));
         let grant = spawned.grant.clone();
         // `EVENTS` needs all three: a host outbox, a manifest producer, and
         // the operator grant covering that producer.
@@ -768,6 +776,8 @@ impl PluginSession {
             describe: desc,
             grant,
             scratch,
+            #[cfg(unix)]
+            guest_ipc_dir,
             spawn_config,
             authority_fence,
             #[cfg(windows)]
@@ -988,6 +998,19 @@ impl PluginSession {
     #[must_use]
     pub fn scratch_dir(&self) -> &std::path::Path {
         &self.scratch
+    }
+
+    /// Directory the guest may use for pathname sockets, when this session has one.
+    #[must_use]
+    pub fn guest_ipc_dir(&self) -> Option<&std::path::Path> {
+        #[cfg(unix)]
+        {
+            self.guest_ipc_dir.as_deref()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// AppContainer package SID when the guest is jailed on Windows.
