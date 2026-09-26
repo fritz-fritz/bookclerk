@@ -4,12 +4,15 @@
 mod ng_harness;
 
 use std::ffi::OsString;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bookclerk_plugin_host::{
-    consent_request, PluginGrantStore, PluginSession, SessionServices, HOST_SHARED_ACCOUNT,
-    WORKERD_BIN_ENV,
+    consent_request, reconcile_grants_from_disk, PluginGrantStore, PluginSession, SessionServices,
+    HOST_SHARED_ACCOUNT, WORKERD_BIN_ENV,
 };
+use bookclerk_plugin_sdk::CliInvokeParams;
 use ng_harness::{
     kill_pid, linux_fd_count, open_session, probe, process_alive, session_dirs_under, step,
     wait_for_exit, Install, Listener, SPAWN_TIMEOUT,
@@ -133,16 +136,7 @@ async fn killing_guest_errors_rpc_and_exits_gateway() {
     step("gateway exited after guest kill");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grant_revision_bump_fences_the_live_session() {
-    let _env = workerd_bin_lock().await;
-    let listener = Listener::bind(true).await;
-    let install = Install::new(listener.port);
-    let session = install.spawn().await;
-    open_session(&session).await;
-    let gateway = session.gateway_pid().expect("gateway");
-    let guest = session.guest_pid().expect("guest");
-
+fn revoke_grant(install: &Install) {
     let plugin = install.plugin();
     let mut grants = PluginGrantStore::load(install.files_dir()).expect("load grants");
     let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
@@ -150,27 +144,246 @@ async fn grant_revision_bump_fences_the_live_session() {
     grant.domains.insert("revoked.example".into());
     grants.upsert(grant);
     grants.save(install.files_dir()).expect("save grants");
+    reconcile_grants_from_disk(install.files_dir());
+}
 
-    let deadline = Instant::now() + SPAWN_TIMEOUT;
-    let mut fenced = false;
-    while Instant::now() < deadline {
-        match tokio::time::timeout(ng_harness::RPC_TIMEOUT, session.describe())
+struct ClearDialDelay;
+impl Drop for ClearDialDelay {
+    fn drop(&mut self) {
+        std::env::remove_var("BOOKCLERK_TEST_PROXY_DIAL_DELAY_MS");
+    }
+}
+
+/// Echo listener that counts accepts and clean EOFs.
+struct EofListener {
+    port: u16,
+    accepts: Arc<AtomicUsize>,
+    eofs: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl EofListener {
+    async fn bind() -> Self {
+        let listener = tokio::net::TcpListener::bind((ng_harness::LOOPBACK, 0))
             .await
-            .unwrap_or_else(|_| {
-                ng_harness::fail_deadline("describe hung while waiting for the grant fence")
-            }) {
-            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            Err(_) => {
-                fenced = true;
-                break;
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let eofs = Arc::new(AtomicUsize::new(0));
+        let accepts_task = Arc::clone(&accepts);
+        let eofs_task = Arc::clone(&eofs);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                accepts_task.fetch_add(1, Ordering::SeqCst);
+                let eofs_task = Arc::clone(&eofs_task);
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 64];
+                    loop {
+                        match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
+                            Ok(0) | Err(_) => {
+                                eofs_task.fetch_add(1, Ordering::SeqCst);
+                                break;
+                            }
+                            Ok(n) => {
+                                if tokio::io::AsyncWriteExt::write_all(&mut stream, &buf[..n])
+                                    .await
+                                    .is_err()
+                                {
+                                    eofs_task.fetch_add(1, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
             }
+        });
+        Self {
+            port,
+            accepts,
+            eofs,
+            task,
         }
     }
-    assert!(fenced, "session was not fenced after grant revision bump");
+}
+
+impl Drop for EofListener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grant_revision_bump_fences_the_live_session() {
+    let _env = workerd_bin_lock().await;
+    let listener = EofListener::bind().await;
+    let install = Install::new(listener.port);
+    let session = install.spawn().await;
+    open_session(&session).await;
+    let gateway = session.gateway_pid().expect("gateway");
+    let guest = session.guest_pid().expect("guest");
+    let files = install.files_dir().to_path_buf();
+
+    let params = CliInvokeParams {
+        command: "probe".into(),
+        args: vec![
+            bookclerk_plugin_sdk::CliArg {
+                name: "op".into(),
+                value: "hold".into(),
+            },
+            bookclerk_plugin_sdk::CliArg {
+                name: "host".into(),
+                value: ng_harness::LOOPBACK.into(),
+            },
+            bookclerk_plugin_sdk::CliArg {
+                name: "port".into(),
+                value: listener.port.to_string(),
+            },
+            bookclerk_plugin_sdk::CliArg {
+                name: "payload".into(),
+                value: "hold".into(),
+            },
+        ],
+    };
+    let hung = tokio::spawn({
+        let session_call = async move { session.cli_invoke(params).await };
+        session_call
+    });
+    let ready = Instant::now() + std::time::Duration::from_secs(15);
+    while listener.accepts.load(Ordering::SeqCst) < 1 {
+        assert!(Instant::now() < ready, "held TCP stream was not accepted");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // `session` was moved into the hung task. Revoke fences that RPC directly.
+    // The install (and its parent) stay alive for the directory assertion.
+    revoke_grant(&install);
+    let rpc = tokio::time::timeout(ng_harness::RPC_TIMEOUT, hung)
+        .await
+        .unwrap_or_else(|_| ng_harness::fail_deadline("held RPC did not return after revoke"))
+        .expect("rpc task");
+    assert!(
+        rpc.is_err(),
+        "hung RPC must fail when the grant changes: {rpc:?}"
+    );
+    let eof_deadline = Instant::now() + ng_harness::SETTLE_TIMEOUT;
+    while listener.eofs.load(Ordering::SeqCst) < 1 {
+        assert!(
+            Instant::now() < eof_deadline,
+            "proxied stream stayed open after revoke"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        listener.accepts.load(Ordering::SeqCst),
+        1,
+        "proxy accepted another connection after revoke"
+    );
     wait_for_exit(gateway).await;
     wait_for_exit(guest).await;
-    drop(session);
-    step("grant revision bump shut the session down");
+    assert!(
+        session_dirs_under(&files).is_empty(),
+        "session dir leaked under {}",
+        files.display()
+    );
+    step("grant revision bump closed the stream and the session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_during_dial_does_not_open_the_upstream() {
+    let _env = workerd_bin_lock().await;
+    let _delay = ClearDialDelay;
+    std::env::set_var("BOOKCLERK_TEST_PROXY_DIAL_DELAY_MS", "2000");
+    let listener = EofListener::bind().await;
+    let install = Install::new(listener.port);
+    let session = install.spawn().await;
+    open_session(&session).await;
+    let gateway = session.gateway_pid().expect("gateway");
+    let guest = session.guest_pid().expect("guest");
+    let files = install.files_dir().to_path_buf();
+    let port = listener.port;
+    let hung = tokio::spawn(async move {
+        session
+            .cli_invoke(CliInvokeParams {
+                command: "probe".into(),
+                args: vec![
+                    bookclerk_plugin_sdk::CliArg {
+                        name: "op".into(),
+                        value: "connect".into(),
+                    },
+                    bookclerk_plugin_sdk::CliArg {
+                        name: "host".into(),
+                        value: ng_harness::LOOPBACK.into(),
+                    },
+                    bookclerk_plugin_sdk::CliArg {
+                        name: "port".into(),
+                        value: port.to_string(),
+                    },
+                    bookclerk_plugin_sdk::CliArg {
+                        name: "payload".into(),
+                        value: "dial".into(),
+                    },
+                ],
+            })
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    revoke_grant(&install);
+    let rpc = tokio::time::timeout(ng_harness::RPC_TIMEOUT, hung)
+        .await
+        .unwrap_or_else(|_| ng_harness::fail_deadline("dial RPC did not return after revoke"))
+        .expect("rpc task");
+    assert!(rpc.is_err(), "dial RPC must fail when revoked: {rpc:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        listener.accepts.load(Ordering::SeqCst),
+        0,
+        "dial was committed after the session was revoked"
+    );
+    wait_for_exit(gateway).await;
+    wait_for_exit(guest).await;
+    assert!(session_dirs_under(&files).is_empty());
+    step("revoke during dial closed the session without an upstream accept");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoke_during_initial_describe_fails_the_spawn() {
+    let _env = workerd_bin_lock().await;
+    let listener = EofListener::bind().await;
+    let install = Install::new(listener.port);
+    let plugin = install.plugin();
+    let config = install.config.clone();
+    let files = install.files_dir().to_path_buf();
+    let spawned = tokio::spawn(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            PluginSession::spawn_with(
+                &plugin,
+                &config,
+                serde_json::json!({}),
+                HOST_SHARED_ACCOUNT,
+                &[("BOOKCLERK_PROBE_DESCRIBE_DELAY_MS", OsString::from("8000"))],
+                SessionServices::default(),
+            ),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    revoke_grant(&install);
+    let result = spawned.await.expect("spawn task");
+    let result = result.unwrap_or_else(|_| ng_harness::fail_deadline("startup revoke hung"));
+    assert!(
+        result.is_err(),
+        "spawn must fail when authority changes during describe"
+    );
+    assert!(
+        session_dirs_under(&files).is_empty(),
+        "startup failure left a session dir"
+    );
+    assert_eq!(listener.accepts.load(Ordering::SeqCst), 0);
+    step("revoke during describe failed the spawn and removed the session dir");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

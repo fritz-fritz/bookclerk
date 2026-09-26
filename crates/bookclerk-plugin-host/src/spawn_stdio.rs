@@ -87,11 +87,28 @@ pub(crate) struct SpawnedStdio {
     /// feature is unsupported. Required isolation fails before this is set.
     #[cfg(windows)]
     pub outer_job_unsupported: bool,
+    /// Cancel flag shared by the host proxy, initial describe, and RPCs.
+    pub cancel: Arc<AtomicBool>,
+    /// Host CONNECT proxy. Drop cancels its tasks.
+    pub proxy: Option<bookclerk_workerd::socket_proxy::ProxyServer>,
     /// Last lines of guest + gateway stderr, for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
     /// Files dir used to re-read `plugin-grants.json` before returning a session.
     pub files_dir: PathBuf,
 }
+
+/// Child processes plus the session cancel token and optional host proxy.
+type SpawnedParts = (
+    Child,
+    Option<Child>,
+    ChildStdin,
+    ChildStdout,
+    Option<u32>,
+    Option<u32>,
+    Option<WindowsSessionJob>,
+    Arc<AtomicBool>,
+    Option<bookclerk_workerd::socket_proxy::ProxyServer>,
+);
 
 /// Removes `session_dir` unless [`Self::disarm`] is called after a successful spawn.
 struct SessionDirGuard(Option<PathBuf>);
@@ -159,12 +176,13 @@ pub(crate) async fn spawn_stdio_guest(
         .await
     };
 
-    let (child, guest, stdin, stdout, gateway_pid, guest_pid, session_job) = match spawned {
-        Ok(parts) => parts,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+    let (child, guest, stdin, stdout, gateway_pid, guest_pid, session_job, cancel, proxy) =
+        match spawned {
+            Ok(parts) => parts,
+            Err(err) => {
+                return Err(err);
+            }
+        };
     let session_dir = session_guard.disarm();
     #[cfg(not(windows))]
     let _ = session_job;
@@ -194,6 +212,8 @@ pub(crate) async fn spawn_stdio_guest(
         session_job,
         #[cfg(windows)]
         outer_job_unsupported: jail.guest_start.is_some() && session_job.is_none(),
+        cancel,
+        proxy,
         stderr_tail,
         files_dir: config.paths().files_dir.clone(),
     })
@@ -209,15 +229,7 @@ async fn spawn_single(
     extra_env: &[(&str, OsString)],
     id: &str,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-) -> Result<(
-    Child,
-    Option<Child>,
-    ChildStdin,
-    ChildStdout,
-    Option<u32>,
-    Option<u32>,
-    Option<WindowsSessionJob>,
-)> {
+) -> Result<SpawnedParts> {
     tracing::debug!(
         plugin = %id,
         program = %plan.launcher.display(),
@@ -255,7 +267,17 @@ async fn spawn_single(
         .take()
         .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
     let pid = child.id();
-    Ok((child, None, stdin, stdout, None, pid, None))
+    Ok((
+        child,
+        None,
+        stdin,
+        stdout,
+        None,
+        pid,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        None,
+    ))
 }
 
 /// Host-spawned gateway + native guest joined by inherited duplex links.
@@ -268,15 +290,7 @@ async fn spawn_siblings(
     extra_env: &[(&str, OsString)],
     id: &str,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
-) -> Result<(
-    Child,
-    Option<Child>,
-    ChildStdin,
-    ChildStdout,
-    Option<u32>,
-    Option<u32>,
-    Option<WindowsSessionJob>,
-)> {
+) -> Result<SpawnedParts> {
     let backend = plan.native_backend.as_ref().ok_or_else(|| {
         PluginError::message("native-behind-workerd spawn is missing the backend path")
     })?;
@@ -352,13 +366,17 @@ async fn spawn_siblings(
     // The unsandboxed host serves the CONNECT mux. A jailed gateway cannot
     // dial the host's loopback on Windows (no machine-wide exemption), and
     // the same host-side check is the policy boundary on every OS.
+    // The cancel flag exists before either sibling so a revoke during startup
+    // reaches the proxy and the initial describe.
+    let cancel = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
-    serve_host_socket_proxy(proxy_gateway, grant.egress_policy())?;
+    let proxy = serve_host_socket_proxy(proxy_gateway, grant.egress_policy(), Arc::clone(&cancel))?;
     #[cfg(windows)]
-    serve_host_socket_proxy(
+    let proxy = serve_host_socket_proxy(
         proxy_pipes.host_stdout,
         proxy_pipes.host_stdin,
         grant.egress_policy(),
+        Arc::clone(&cancel),
     )?;
 
     #[cfg(unix)]
@@ -505,6 +523,8 @@ async fn spawn_siblings(
         gateway_pid,
         guest_pid,
         session_job,
+        cancel,
+        Some(proxy),
     ))
 }
 
@@ -598,7 +618,8 @@ fn inherit_unix_gateway(cmd: &mut Command, rpc: &DuplexLink) {
 fn serve_host_socket_proxy(
     link: DuplexLink,
     policy: bookclerk_plugin_manifest::EgressPolicy,
-) -> Result<()> {
+    fence: Arc<AtomicBool>,
+) -> Result<bookclerk_workerd::socket_proxy::ProxyServer> {
     use std::os::unix::net::UnixStream;
     let std_stream = UnixStream::from(link.into_owned_fd());
     std_stream
@@ -606,7 +627,6 @@ fn serve_host_socket_proxy(
         .map_err(|err| PluginError::message(format!("host socket proxy nonblocking: {err}")))?;
     let stream = tokio::net::UnixStream::from_std(std_stream)
         .map_err(|err| PluginError::message(format!("host socket proxy wrap: {err}")))?;
-    let fence = Arc::new(AtomicBool::new(false));
     bookclerk_workerd::socket_proxy::spawn_link(stream, policy, fence)
         .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
 }
@@ -618,7 +638,8 @@ fn serve_host_socket_proxy(
     read: DuplexHalf,
     write: DuplexHalf,
     policy: bookclerk_plugin_manifest::EgressPolicy,
-) -> Result<()> {
+    fence: Arc<AtomicBool>,
+) -> Result<bookclerk_workerd::socket_proxy::ProxyServer> {
     use std::os::windows::io::IntoRawHandle;
     let read = unsafe {
         tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
@@ -632,7 +653,6 @@ fn serve_host_socket_proxy(
         )
     }
     .map_err(|err| PluginError::message(format!("host proxy write pipe: {err}")))?;
-    let fence = Arc::new(AtomicBool::new(false));
     bookclerk_workerd::socket_proxy::spawn_halves(read, write, policy, fence)
         .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
 }

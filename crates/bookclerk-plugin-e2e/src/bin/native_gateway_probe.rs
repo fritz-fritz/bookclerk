@@ -66,6 +66,11 @@ struct Root;
 #[async_trait(?Send)]
 impl PluginWorker for Root {
     async fn describe(&self) -> Result<PluginDescribe, PluginError> {
+        if let Ok(ms) = std::env::var("BOOKCLERK_PROBE_DESCRIBE_DELAY_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+        }
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: PLUGIN_ID.into(),
@@ -127,6 +132,37 @@ async fn mediated(host: &str, port: u16, payload: &str) -> Result<String, String
     String::from_utf8(echoed).map_err(|err| format!("echo not utf-8: {err}"))
 }
 
+async fn hold_until_eof(host: &str, port: u16, payload: &str) -> Result<(), String> {
+    let address = SocketAddress {
+        hostname: host.into(),
+        port,
+    };
+    let mut socket = tokio::time::timeout(
+        IO_TIMEOUT,
+        bookclerk_plugin_sdk::net::connect(address, ConnectOptions::default()),
+    )
+    .await
+    .map_err(|_| "connect timed out".to_string())?
+    .map_err(|err| err.to_string())?;
+    let stream = socket.stream();
+    stream
+        .write_all(payload.as_bytes())
+        .await
+        .map_err(|err| format!("write: {err}"))?;
+    stream
+        .flush()
+        .await
+        .map_err(|err| format!("flush: {err}"))?;
+    let mut echoed = vec![0_u8; payload.len()];
+    tokio::time::timeout(IO_TIMEOUT, stream.read_exact(&mut echoed))
+        .await
+        .map_err(|_| "echo timed out".to_string())?
+        .map_err(|err| format!("echo: {err}"))?;
+    let mut extra = [0_u8; 8];
+    let _ = stream.read(&mut extra).await;
+    Ok(())
+}
+
 fn ambient(host: &str, port: u16) -> Result<(), String> {
     let addr: std::net::SocketAddr = format!("{host}:{port}")
         .parse()
@@ -166,6 +202,15 @@ impl PluginCli for Probe {
                 keys.sort();
                 let proxy = std::env::var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV).ok();
                 serde_json::json!({ "ok": true, "keys": keys, "socket_proxy": proxy })
+            }
+            "hold" => match hold_until_eof(host, port, arg(&params, "payload")).await {
+                Ok(()) => serde_json::json!({ "ok": true, "eof": true }),
+                Err(error) => serde_json::json!({ "ok": false, "error": error }),
+            },
+            "block" => {
+                let ms = arg(&params, "payload").parse::<u64>().unwrap_or(30_000);
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                serde_json::json!({ "ok": true })
             }
             "read_path" => {
                 let path = arg(&params, "payload");

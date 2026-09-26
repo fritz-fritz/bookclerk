@@ -695,6 +695,7 @@ impl PluginSession {
             )));
         }
         let files_dir = spawned.files_dir.clone();
+        let cancel = Arc::clone(&spawned.cancel);
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
@@ -703,13 +704,32 @@ impl PluginSession {
             .name(vat_thread_name(&id))
             .spawn(move || vat_thread(spawned, manifest, vat_account, events, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
-        // Live-session registration happens after describe succeeds; pre-register
-        // failures must not call unregister_session.
-        let (desc, limits, features) = ready_rx
-            .await
-            .map_err(|err| PluginError::message(format!("plugin vat dropped: {err}")))??;
+        // Register before describe returns so a grant change during startup
+        // sets `cancel` immediately. The proxy and the vat already select on it.
+        let shutdown_tx = tx.clone();
+        let authority_fence = crate::authority::register_session_revisions_on(
+            plugin.plugin_key().canonical(),
+            &identity.grant_revision,
+            &identity.authority_revision,
+            Arc::new(move || {
+                let _ = shutdown_tx.send(Work::Shutdown);
+            }),
+            Arc::clone(&cancel),
+        );
+        let (desc, limits, features) = match ready_rx.await {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(err)) => {
+                crate::authority::unregister_session(&authority_fence);
+                return Err(err);
+            }
+            Err(err) => {
+                crate::authority::unregister_session(&authority_fence);
+                return Err(PluginError::message(format!("plugin vat dropped: {err}")));
+            }
+        };
         if desc.api_version != PRODUCT_API_VERSION {
             let _ = tx.send(Work::Shutdown);
+            crate::authority::unregister_session(&authority_fence);
             return Err(PluginError::message(format!(
                 "plugin `{id}` describe apiVersion {} is not {PRODUCT_API_VERSION}",
                 desc.api_version
@@ -720,24 +740,18 @@ impl PluginSession {
                 let effective = crate::spawn_stdio::effective_spawn_grant(&fresh, plugin, config);
                 if crate::authority::authority_revision(&effective) == identity.authority_revision {
                 } else {
+                    cancel.store(true, Ordering::SeqCst);
                     let _ = tx.send(Work::Shutdown);
+                    crate::authority::unregister_session(&authority_fence);
                     return Err(crate::authority::fenced_error());
                 }
             }
             Err(err) => {
                 let _ = tx.send(Work::Shutdown);
+                crate::authority::unregister_session(&authority_fence);
                 return Err(err);
             }
         }
-        let shutdown_tx = tx.clone();
-        let authority_fence = crate::authority::register_session_revisions(
-            plugin.plugin_key().canonical(),
-            &identity.grant_revision,
-            &identity.authority_revision,
-            Arc::new(move || {
-                let _ = shutdown_tx.send(Work::Shutdown);
-            }),
-        );
         Ok(Self {
             tx,
             id,
@@ -1570,6 +1584,7 @@ impl PluginSession {
 
 impl Drop for PluginSession {
     fn drop(&mut self) {
+        self.authority_fence.store(true, Ordering::SeqCst);
         crate::authority::unregister_session(&self.authority_fence);
         let _ = self.tx.send(Work::Shutdown);
     }
@@ -2008,6 +2023,8 @@ fn vat_thread(
                 let mut remove_session_dir = spawned.session_dir.map(RemoveOnDrop);
                 #[cfg(windows)]
                 let _session_job = spawned.session_job;
+                let cancel = Arc::clone(&spawned.cancel);
+                let _proxy = spawned.proxy;
                 let mut child = spawned.child;
                 let mut guest = spawned.guest;
                 let stderr_tail = spawned.stderr_tail;
@@ -2019,6 +2036,9 @@ fn vat_thread(
                 // macOS), so the wait is raced with process exit.
                 let described = tokio::select! {
                     biased;
+                    () = wait_flag(Arc::clone(&cancel)) => {
+                        Err(crate::authority::fenced_error())
+                    }
                     result = client.describe() => result.map_err(map_abi),
                     () = sibling_exit(&mut child, &mut guest) => {
                         Err(PluginError::unavailable(
@@ -2075,15 +2095,23 @@ fn vat_thread(
                     Box<dyn bookclerk_plugin_abi::AdapterTransaction>,
                 > = std::collections::HashMap::new();
                 loop {
-                    // `try_wait` before taking work: a SIGKILL'd sibling is
-                    // already a zombie, and cancelling `Child::wait` inside
-                    // `select!` can drop that status so the next wait hangs.
+                    // `try_wait` notices an already-reaped sibling. Tokio
+                    // `Child::wait` is cancellation-safe; a cancelled wait does
+                    // not drop zombie status.
                     if sibling_exited(&mut child, guest.as_mut()) {
                         tracing::info!("sibling exited; ending plugin vat");
                         break;
                     }
+                    if cancel.load(Ordering::SeqCst) {
+                        tracing::info!("session cancelled; ending plugin vat");
+                        break;
+                    }
                     let work = tokio::select! {
                         biased;
+                        () = wait_flag(Arc::clone(&cancel)) => {
+                            tracing::info!("session cancelled while idle; ending plugin vat");
+                            break;
+                        }
                         () = sibling_exit(&mut child, &mut guest) => {
                             tracing::info!("sibling exited while idle; ending plugin vat");
                             break;
@@ -2098,6 +2126,9 @@ fn vat_thread(
                         Work::Describe { reply } => {
                             let described = tokio::select! {
                                 biased;
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(crate::authority::fenced_error())
+                                }
                                 () = sibling_exit(&mut child, &mut guest) => {
                                     Err(PluginError::unavailable("plugin process exited"))
                                 }
@@ -2105,27 +2136,53 @@ fn vat_thread(
                             };
                             let dead = described.is_err();
                             let _ = reply.send(described);
-                            if dead && sibling_exited(&mut child, guest.as_mut()) {
+                            if cancel.load(Ordering::SeqCst)
+                                || (dead && sibling_exited(&mut child, guest.as_mut()))
+                            {
                                 break;
                             }
                         }
                         Work::Open { values, reply } => {
-                            let out = primary_entrypoints(
-                                &client,
-                                &account_id,
-                                &mut primary,
-                                Some(values),
-                            )
-                            .await
-                            .map(|_| ());
-                            let _ = reply.send(out);
-                        }
-                        Work::Head { key, reply } => {
-                            let out = match storage(&client, &account_id, &mut primary).await {
-                                Ok(d) => d.head(&key).await.map_err(map_abi),
-                                Err(err) => Err(err),
+                            let out = tokio::select! {
+                                biased;
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(crate::authority::fenced_error())
+                                }
+                                () = sibling_exit(&mut child, &mut guest) => {
+                                    Err(PluginError::unavailable("plugin process exited"))
+                                }
+                                result = primary_entrypoints(
+                                    &client,
+                                    &account_id,
+                                    &mut primary,
+                                    Some(values),
+                                ) => result.map(|_| ()),
                             };
                             let _ = reply.send(out);
+                            if cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
+                        }
+                        Work::Head { key, reply } => {
+                            let out = tokio::select! {
+                                biased;
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(crate::authority::fenced_error())
+                                }
+                                () = sibling_exit(&mut child, &mut guest) => {
+                                    Err(PluginError::unavailable("plugin process exited"))
+                                }
+                                result = async {
+                                    match storage(&client, &account_id, &mut primary).await {
+                                        Ok(d) => d.head(&key).await.map_err(map_abi),
+                                        Err(err) => Err(err),
+                                    }
+                                } => result,
+                            };
+                            let _ = reply.send(out);
+                            if cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
                         }
                         Work::List { options, reply } => {
                             let out = match storage(&client, &account_id, &mut primary).await {
@@ -2310,21 +2367,35 @@ fn vat_thread(
                             let _ = reply.send(out);
                         }
                         Work::CliInvoke { params, reply } => {
-                            let out = match primary_entrypoints(
-                                &client,
-                                &account_id,
-                                &mut primary,
-                                None,
-                            )
-                            .await
-                            {
-                                Ok(eps) => match eps.cli.as_ref() {
-                                    Some(cli) => cli.invoke(params).await.map_err(map_abi),
-                                    None => Err(missing_entrypoint("cli")),
-                                },
-                                Err(err) => Err(err),
+                            let out = tokio::select! {
+                                biased;
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(crate::authority::fenced_error())
+                                }
+                                () = sibling_exit(&mut child, &mut guest) => {
+                                    Err(PluginError::unavailable("plugin process exited"))
+                                }
+                                result = async {
+                                    match primary_entrypoints(
+                                        &client,
+                                        &account_id,
+                                        &mut primary,
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        Ok(eps) => match eps.cli.as_ref() {
+                                            Some(cli) => cli.invoke(params).await.map_err(map_abi),
+                                            None => Err(missing_entrypoint("cli")),
+                                        },
+                                        Err(err) => Err(err),
+                                    }
+                                } => result,
                             };
                             let _ = reply.send(out);
+                            if cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
                         }
                         Work::OidcClients { reply } => {
                             let out = match primary_entrypoints(

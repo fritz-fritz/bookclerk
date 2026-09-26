@@ -10,7 +10,7 @@
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -20,6 +20,66 @@ use tokio::net::TcpStream;
 
 /// Env var naming the socket proxy path for the native SDK.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+
+/// In-flight host CONNECT proxy. Dropping it cancels accepts and handlers.
+///
+/// The [`Self::fence`] flag is the session cancel token. Authority revocation
+/// sets that flag directly; handlers race it against parsing, DNS, dial, and
+/// the byte relay.
+pub struct ProxyServer {
+    /// Session cancel flag. `true` stops new accepts and in-flight relays.
+    fence: Arc<AtomicBool>,
+    /// Handler tasks. The accept loop pushes one before each stream runs.
+    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Accept loop. Aborted on drop.
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ProxyServer {
+    /// Cancel flag shared with the session owner.
+    #[must_use]
+    pub fn fence(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.fence)
+    }
+
+    /// Signal handlers to stop. In-flight work selects on [`Self::fence`].
+    pub fn cancel(&self) {
+        self.fence.store(true, Ordering::SeqCst);
+    }
+
+    /// Handler tasks that have not finished.
+    #[must_use]
+    pub fn unfinished_handlers(&self) -> usize {
+        self.tasks
+            .lock()
+            .map(|guard| guard.iter().filter(|task| !task.is_finished()).count())
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for ProxyServer {
+    fn drop(&mut self) {
+        self.fence.store(true, Ordering::SeqCst);
+        if let Some(task) = self.accept.take() {
+            task.abort();
+        }
+        if let Ok(mut tasks) = self.tasks.lock() {
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
+    }
+}
+
+fn track_handler(
+    tasks: &Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    if let Ok(mut guard) = tasks.lock() {
+        guard.retain(|task| !task.is_finished());
+        guard.push(handle);
+    }
+}
 
 /// Serve HTTP CONNECT on a Unix listener until the task is cancelled.
 ///
@@ -32,26 +92,30 @@ pub fn spawn_unix(
     listener: std::os::unix::net::UnixListener,
     policy: EgressPolicy,
     fence: Arc<AtomicBool>,
-) -> Result<()> {
+) -> Result<ProxyServer> {
     listener.set_nonblocking(true)?;
     let listener = tokio::net::UnixListener::from_std(listener)?;
-    tokio::spawn(async move {
+    let tasks = Arc::new(Mutex::new(Vec::new()));
+    let accept_tasks = Arc::clone(&tasks);
+    let accept_fence = Arc::clone(&fence);
+    let accept = tokio::spawn(async move {
         loop {
-            if fence.load(Ordering::SeqCst) {
+            if accept_fence.load(Ordering::SeqCst) {
                 break;
             }
             tokio::select! {
-                () = wait_fence(&fence) => break,
+                () = wait_fence(&accept_fence) => break,
                 accept = listener.accept() => {
                     match accept {
                         Ok((stream, _)) => {
                             let policy = policy.clone();
-                            let fence = Arc::clone(&fence);
-                            tokio::spawn(async move {
+                            let fence = Arc::clone(&accept_fence);
+                            let handle = tokio::spawn(async move {
                                 if let Err(err) = handle_client(stream, policy, fence).await {
                                     tracing::debug!(error = %err, "socket proxy session ended");
                                 }
                             });
+                            track_handler(&accept_tasks, handle);
                         }
                         Err(err) => {
                             tracing::debug!(error = %err, "socket proxy accept failed");
@@ -62,65 +126,112 @@ pub fn spawn_unix(
             }
         }
     });
-    Ok(())
+    Ok(ProxyServer {
+        fence,
+        tasks,
+        accept: Some(accept),
+    })
 }
 
 async fn handle_client<S>(stream: S, policy: EgressPolicy, fence: Arc<AtomicBool>) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    if fence.load(Ordering::SeqCst) {
+        bail!("session fenced");
+    }
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    let request = line.trim_end();
-    let (host, port) = parse_connect(request)?;
+    read_line_fenced(&mut reader, &mut line, &fence).await?;
+    let request = line.trim_end().to_string();
+    let (host, port) = parse_connect(&request)?;
     // Drain remaining request headers.
     loop {
         line.clear();
-        reader.read_line(&mut line).await?;
+        read_line_fenced(&mut reader, &mut line, &fence).await?;
         if line.trim().is_empty() {
             break;
         }
     }
     if fence.load(Ordering::SeqCst) {
-        writer
-            .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            .await?;
+        let _ = write_fenced(
+            &mut writer,
+            b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            &fence,
+        )
+        .await;
         bail!("session fenced");
     }
     if !policy.allows_tcp(&host, port) {
-        writer
-            .write_all(
-                b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
+        write_fenced(
+            &mut writer,
+            b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
 tcp connect is not in capabilities.network.tcp",
-            )
-            .await?;
+            &fence,
+        )
+        .await?;
         bail!("tcp grant denied for {host}:{port}");
     }
-    let mut addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-        .await
-        .with_context(|| format!("resolve {host}"))?
+    let looked_up = tokio::select! {
+        biased;
+        () = wait_fence(&fence) => bail!("session fenced"),
+        result = tokio::net::lookup_host((host.as_str(), port)) => {
+            result.with_context(|| format!("resolve {host}"))?
+        }
+    };
+    let mut addrs: Vec<std::net::SocketAddr> = looked_up
         .filter(|addr| policy.allows_ip(addr.ip()))
         .collect();
     if addrs.is_empty() {
-        writer
-            .write_all(
-                b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
+        write_fenced(
+            &mut writer,
+            b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
 resolved address is outside the granted address space",
-            )
-            .await?;
+            &fence,
+        )
+        .await?;
         bail!("no allowed address for {host}:{port}");
     }
     // `localhost` often resolves `::1` first. CI Postgres (and many operator
     // hosts) listen IPv4-only; dialing only the first allowed address then RST
     // the Unix client, which sqlx reports as "Connection reset by peer".
     addrs.sort_by_key(std::net::SocketAddr::is_ipv6);
+    if let Some(delay) = test_dial_delay() {
+        tokio::select! {
+            biased;
+            () = wait_fence(&fence) => {
+                let _ = write_fenced(&mut writer, FORBIDDEN_FENCED, &fence).await;
+                bail!("session fenced");
+            }
+            () = tokio::time::sleep(delay) => {}
+        }
+    }
+    // Recheck after DNS and before the dial is committed.
+    if fence.load(Ordering::SeqCst) {
+        let _ = write_fenced(&mut writer, FORBIDDEN_FENCED, &fence).await;
+        bail!("session fenced");
+    }
     let mut last_err: Option<std::io::Error> = None;
     let mut upstream = None;
     for dest in addrs {
-        match TcpStream::connect(dest).await {
+        if fence.load(Ordering::SeqCst) {
+            bail!("session fenced");
+        }
+        let connected = tokio::select! {
+            biased;
+            () = wait_fence(&fence) => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "session fenced",
+            )),
+            result = TcpStream::connect(dest) => result,
+        };
+        match connected {
             Ok(stream) => {
+                if fence.load(Ordering::SeqCst) {
+                    drop(stream);
+                    bail!("session fenced");
+                }
                 upstream = Some(stream);
                 break;
             }
@@ -131,21 +242,71 @@ resolved address is outside the granted address space",
         let detail = last_err
             .map(|err| err.to_string())
             .unwrap_or_else(|| "no addresses".into());
-        writer
-            .write_all(
-                b"HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
+        let _ = write_fenced(
+            &mut writer,
+            b"HTTP/1.1 502 Bad Gateway\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n\
 could not dial an allowed address",
-            )
-            .await?;
+            &fence,
+        )
+        .await;
         bail!("dial {host}:{port}: {detail}");
     };
-    writer
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
-    writer.flush().await?;
+    write_fenced(
+        &mut writer,
+        b"HTTP/1.1 200 Connection Established\r\n\r\n",
+        &fence,
+    )
+    .await?;
+    tokio::select! {
+        biased;
+        () = wait_fence(&fence) => bail!("session fenced"),
+        result = writer.flush() => result?,
+    }
     let reader = reader.into_inner();
     let mut client = reader.unsplit(writer);
     splice(&mut client, &mut upstream, &fence).await
+}
+
+const FORBIDDEN_FENCED: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+async fn read_line_fenced<R>(
+    reader: &mut BufReader<R>,
+    line: &mut String,
+    fence: &AtomicBool,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    tokio::select! {
+        biased;
+        () = wait_fence(fence) => bail!("session fenced"),
+        result = reader.read_line(line) => {
+            result?;
+            Ok(())
+        }
+    }
+}
+
+async fn write_fenced<W>(writer: &mut W, bytes: &[u8], fence: &AtomicBool) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    tokio::select! {
+        biased;
+        () = wait_fence(fence) => bail!("session fenced"),
+        result = writer.write_all(bytes) => {
+            result?;
+            Ok(())
+        }
+    }
+}
+
+/// Test-only pause before `TcpStream::connect`, raced with the cancel flag.
+fn test_dial_delay() -> Option<Duration> {
+    let ms = std::env::var("BOOKCLERK_TEST_PROXY_DIAL_DELAY_MS").ok()?;
+    let ms = ms.parse::<u64>().ok()?;
+    Some(Duration::from_millis(ms))
 }
 
 /// Serve HTTP CONNECT on mux-accepted streams from an inherited sibling link.
@@ -153,7 +314,7 @@ could not dial an allowed address",
 /// # Errors
 ///
 /// Returns an error only if the accept task cannot be spawned (it does not).
-pub fn spawn_link<S>(link: S, policy: EgressPolicy, fence: Arc<AtomicBool>) -> Result<()>
+pub fn spawn_link<S>(link: S, policy: EgressPolicy, fence: Arc<AtomicBool>) -> Result<ProxyServer>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
@@ -174,29 +335,33 @@ pub fn spawn_halves<R, W>(
     writer: W,
     policy: EgressPolicy,
     fence: Arc<AtomicBool>,
-) -> Result<()>
+) -> Result<ProxyServer>
 where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     let mux = bookclerk_plugin_sdk::mux::Mux::server(reader, writer);
-    tokio::spawn(async move {
+    let tasks = Arc::new(Mutex::new(Vec::new()));
+    let accept_tasks = Arc::clone(&tasks);
+    let accept_fence = Arc::clone(&fence);
+    let accept = tokio::spawn(async move {
         loop {
-            if fence.load(Ordering::SeqCst) {
+            if accept_fence.load(Ordering::SeqCst) {
                 break;
             }
             tokio::select! {
-                () = wait_fence(&fence) => break,
+                () = wait_fence(&accept_fence) => break,
                 accepted = mux.accept() => {
                     match accepted {
                         Ok(stream) => {
                             let policy = policy.clone();
-                            let fence = Arc::clone(&fence);
-                            tokio::spawn(async move {
+                            let fence = Arc::clone(&accept_fence);
+                            let handle = tokio::spawn(async move {
                                 if let Err(err) = handle_client(stream, policy, fence).await {
                                     tracing::debug!(error = %err, "socket proxy session ended");
                                 }
                             });
+                            track_handler(&accept_tasks, handle);
                         }
                         Err(err) => {
                             tracing::debug!(error = %err, "socket proxy mux closed");
@@ -207,7 +372,11 @@ where
             }
         }
     });
-    Ok(())
+    Ok(ProxyServer {
+        fence,
+        tasks,
+        accept: Some(accept),
+    })
 }
 
 fn parse_connect(request: &str) -> Result<(String, u16)> {
@@ -370,7 +539,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let policy = tcp_policy("db.example.com", 5432, &[]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         client
             .write_all(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
@@ -399,7 +568,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
         client.write_all(req.as_bytes()).await.unwrap();
@@ -436,7 +605,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
         client.write_all(req.as_bytes()).await.unwrap();
@@ -479,7 +648,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let policy = tcp_policy("localhost", port, &["127.0.0.1/32", "::1/128"]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let req = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n");
         client.write_all(req.as_bytes()).await.unwrap();
@@ -509,7 +678,7 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let policy = tcp_policy("127.0.0.1", 9, &[]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         client
             .write_all(b"CONNECT 127.0.0.1:9 HTTP/1.1\r\n\r\n")
@@ -542,7 +711,7 @@ mod tests {
         let gateway_link = tokio::net::UnixStream::from_std(gateway_std).unwrap();
         let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
         let fence = Arc::new(AtomicBool::new(false));
-        spawn_link(gateway_link, policy, Arc::clone(&fence)).unwrap();
+        let _proxy = spawn_link(gateway_link, policy, Arc::clone(&fence)).unwrap();
 
         let guest_link = tokio::net::UnixStream::from_std(guest_std).unwrap();
         let (reader, writer) = guest_link.into_split();

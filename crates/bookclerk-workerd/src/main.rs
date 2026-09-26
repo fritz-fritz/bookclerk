@@ -479,22 +479,26 @@ async fn run_native_behind_workerd(
 
     let socket_fence = Arc::new(AtomicBool::new(false));
     #[cfg(not(windows))]
-    if let Some(proxy) = proxy {
-        bookclerk_workerd::socket_proxy::spawn_link(
+    let proxy_server = if let Some(proxy) = proxy {
+        Some(bookclerk_workerd::socket_proxy::spawn_link(
             proxy,
             egress.policy().clone(),
             Arc::clone(&socket_fence),
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
     #[cfg(windows)]
-    if let Some((proxy_read, proxy_write)) = proxy_halves {
-        bookclerk_workerd::socket_proxy::spawn_halves(
+    let proxy_server = if let Some((proxy_read, proxy_write)) = proxy_halves {
+        Some(bookclerk_workerd::socket_proxy::spawn_halves(
             proxy_read,
             proxy_write,
             egress.policy().clone(),
             Arc::clone(&socket_fence),
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
 
     let result = mediate_native(
         generated.listen.port(),
@@ -510,6 +514,7 @@ async fn run_native_behind_workerd(
     .await;
 
     socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(proxy_server);
 
     let _ = child.kill().await;
     let _ = child.wait().await;
