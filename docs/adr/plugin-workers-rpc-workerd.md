@@ -152,13 +152,15 @@ Native-behind-workerd guests are a **sibling** `NetPolicy::Deny` jail the
 host starts next to the gateway, not a child of `bookclerk-workerd`.
 `native_guest.rs` is gone. IPC is host-created links delivered as
 `fd:<n>` / `handle:<n>` (`BOOKCLERK_GATEWAY_GUEST_RPC`,
-`BOOKCLERK_GATEWAY_PROXY`, `BOOKCLERK_SOCKET_PROXY`). Unix RPC and the
-socket-proxy mux are each one socketpair. Windows RPC and the proxy mux
-are each two unidirectional pipes
-(`BOOKCLERK_GATEWAY_GUEST_RPC` / `BOOKCLERK_GATEWAY_PROXY` read halves,
-`BOOKCLERK_GATEWAY_GUEST_RPC_WRITE` / `BOOKCLERK_GATEWAY_PROXY_WRITE` write
-halves, guest proxy write half `BOOKCLERK_SOCKET_PROXY_WRITE`) so a
-concurrent read cannot lock the write. The guest has no
+`BOOKCLERK_SOCKET_PROXY`). The production CONNECT mux is served by the
+unsandboxed host so granted loopback dials do not depend on AppContainer
+loopback (no CheckNetIsolation exemption). Unjailed conformance may still
+pass `BOOKCLERK_GATEWAY_PROXY` into `bookclerk-workerd`. Unix links are
+socketpairs. Windows links are two unidirectional pipes
+(`BOOKCLERK_GATEWAY_GUEST_RPC` read half,
+`BOOKCLERK_GATEWAY_GUEST_RPC_WRITE` write half, guest proxy write half
+`BOOKCLERK_SOCKET_PROXY_WRITE`) so a concurrent read cannot lock the write.
+The guest has no
 ambient `AF_INET` and no named endpoint. The gateway jail stays
 `OutboundListen` so `bookclerk-workerd` can bind the host↔isolate RPC
 bridge. Gateway `TMPDIR` is a host-owned `session-<nonce>/` directory;

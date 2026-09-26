@@ -291,16 +291,19 @@ Every external guest is started by **`bookclerk-jail`**, a small launcher that
 applies a confinement policy to itself and then `exec`s the program the host
 named. **`bookclerk-workerd`** is the front door: for `runtime = "workerd"` it
 loads the author's isolate; for `runtime = "native"` the host also starts the
-native backend as a **sibling** jail. The two children are joined by
-host-created inherited links (`BOOKCLERK_GATEWAY_GUEST_RPC` /
-`BOOKCLERK_GATEWAY_PROXY` on the gateway, `BOOKCLERK_SOCKET_PROXY` on the
-guest). On Unix each link is one duplex socket (`fd:<n>`). On Windows both
-the proxy and guest RPC are two unidirectional pipes so a concurrent read
-cannot lock the write (`BOOKCLERK_GATEWAY_GUEST_RPC` and
-`BOOKCLERK_GATEWAY_PROXY` are the gateway read halves;
-`BOOKCLERK_GATEWAY_GUEST_RPC_WRITE` and `BOOKCLERK_GATEWAY_PROXY_WRITE` are
-the write halves; the guest proxy write half is
-`BOOKCLERK_SOCKET_PROXY_WRITE`). `bookclerk-workerd` never nests a second jail.
+native backend as a **sibling** jail. Guest RPC is a host-created inherited
+link (`BOOKCLERK_GATEWAY_GUEST_RPC` on the gateway; the guest uses stdin and
+stdout). The CONNECT mux (`BOOKCLERK_SOCKET_PROXY` on the guest) is served by
+the **unsandboxed host**. An AppContainer cannot dial the host's loopback, so
+the jailed gateway must not be the process that connects granted TCP, and
+Bookclerk does not add a machine-wide loopback exemption. Unjailed conformance
+spawns may still hand that mux to `bookclerk-workerd`
+(`BOOKCLERK_GATEWAY_PROXY`). On Unix each link is one duplex socket
+(`fd:<n>`). On Windows each link is two unidirectional pipes so a concurrent
+read cannot lock the write (`BOOKCLERK_GATEWAY_GUEST_RPC` is the gateway read
+half and `BOOKCLERK_GATEWAY_GUEST_RPC_WRITE` is the write half; the guest
+proxy write half is `BOOKCLERK_SOCKET_PROXY_WRITE`). `bookclerk-workerd` never
+nests a second jail.
 
 Nesting is impossible on two of the three production OSes. A Seatbelt
 process cannot apply a second profile (`sandbox_init` returns EPERM even

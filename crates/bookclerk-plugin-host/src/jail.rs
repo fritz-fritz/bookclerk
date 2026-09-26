@@ -697,10 +697,9 @@ fn build_spec_with_grant(
                 vec![session.clone()],
                 reads,
                 NetPolicy::OutboundListen,
-                vec![
-                    bookclerk_sandbox::GATEWAY_RPC_FD,
-                    bookclerk_sandbox::GATEWAY_PROXY_FD,
-                ],
+                // The CONNECT mux stays in the unsandboxed host. Preserving
+                // fd 4 would keep an unrelated descriptor open in the gateway.
+                vec![bookclerk_sandbox::GATEWAY_RPC_FD],
                 Some(vec![session]),
                 ":gateway".to_string(),
             )

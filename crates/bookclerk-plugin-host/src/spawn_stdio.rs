@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use bookclerk_config::Config;
@@ -16,15 +17,15 @@ use bookclerk_config::Config;
 use bookclerk_sandbox::DuplexLink;
 #[cfg(any(windows, test))]
 use bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV;
+#[cfg(test)]
+use bookclerk_sandbox::GATEWAY_PROXY_ENV;
 #[cfg(windows)]
 use bookclerk_sandbox::{DuplexHalf, StdioEnds};
 #[cfg(windows)]
 use bookclerk_sandbox::{JailHandoff, JailHandoffExtra, JAIL_HANDOFF_ENV};
-use bookclerk_sandbox::{
-    GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV,
-};
+use bookclerk_sandbox::{GATEWAY_GUEST_RPC_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV};
 #[cfg(unix)]
-use bookclerk_sandbox::{GATEWAY_PROXY_FD, GATEWAY_RPC_FD, GUEST_PROXY_FD};
+use bookclerk_sandbox::{GATEWAY_RPC_FD, GUEST_PROXY_FD};
 use serde_json::Value;
 #[cfg(windows)]
 use tokio::io::AsyncWriteExt;
@@ -336,9 +337,21 @@ async fn spawn_siblings(
     }
     guest_cmd.stderr(Stdio::piped()).kill_on_drop(true);
 
+    // The unsandboxed host serves the CONNECT mux. A jailed gateway cannot
+    // dial the host's loopback on Windows (no machine-wide exemption), and
+    // the same host-side check is the policy boundary on every OS.
+    #[cfg(unix)]
+    serve_host_socket_proxy(proxy_gateway, grant.egress_policy())?;
+    #[cfg(windows)]
+    serve_host_socket_proxy(
+        proxy_pipes.host_stdout,
+        proxy_pipes.host_stdin,
+        grant.egress_policy(),
+    )?;
+
     #[cfg(unix)]
     {
-        inherit_unix_gateway(&mut gateway_cmd, &rpc_gateway, &proxy_gateway);
+        inherit_unix_gateway(&mut gateway_cmd, &rpc_gateway);
         inherit_unix_guest(&mut guest_cmd, rpc_guest, &proxy_guest)?;
     }
     #[cfg(windows)]
@@ -357,14 +370,9 @@ async fn spawn_siblings(
 
     #[cfg(windows)]
     {
-        if let Err(err) = windows_handoff_gateway(
-            &mut gateway,
-            &rpc_pipes.host_stdout,
-            &rpc_pipes.host_stdin,
-            &proxy_pipes.host_stdout,
-            &proxy_pipes.host_stdin,
-        )
-        .await
+        if let Err(err) =
+            windows_handoff_gateway(&mut gateway, &rpc_pipes.host_stdout, &rpc_pipes.host_stdin)
+                .await
         {
             let _ = gateway.kill().await;
             return Err(err);
@@ -414,7 +422,7 @@ async fn spawn_siblings(
     }
     #[cfg(unix)]
     {
-        let _ = (rpc_gateway, proxy_gateway, proxy_guest);
+        let _ = (rpc_gateway, proxy_guest);
     }
 
     let stdin = gateway
@@ -509,18 +517,62 @@ fn apply_spec_env(cmd: &mut Command, start: &Start) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn inherit_unix_gateway(cmd: &mut Command, rpc: &DuplexLink, proxy: &DuplexLink) {
+fn inherit_unix_gateway(cmd: &mut Command, rpc: &DuplexLink) {
     let rpc_fd = rpc.as_raw_fd();
-    let proxy_fd = proxy.as_raw_fd();
     unsafe {
         cmd.pre_exec(move || {
             bookclerk_sandbox::inherit_fd_at(rpc_fd, GATEWAY_RPC_FD)?;
-            bookclerk_sandbox::inherit_fd_at(proxy_fd, GATEWAY_PROXY_FD)?;
             Ok(())
         });
     }
     cmd.env(GATEWAY_GUEST_RPC_ENV, format!("fd:{GATEWAY_RPC_FD}"));
-    cmd.env(GATEWAY_PROXY_ENV, format!("fd:{GATEWAY_PROXY_FD}"));
+}
+
+/// Serve the guest CONNECT mux in this process.
+///
+/// `link` is the host end of the inherited proxy. The guest holds the other
+/// end. Dialing here reaches host loopback; the gateway AppContainer cannot.
+#[cfg(unix)]
+fn serve_host_socket_proxy(
+    link: DuplexLink,
+    policy: bookclerk_plugin_manifest::EgressPolicy,
+) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    let std_stream = UnixStream::from(link.into_owned_fd());
+    std_stream
+        .set_nonblocking(true)
+        .map_err(|err| PluginError::message(format!("host socket proxy nonblocking: {err}")))?;
+    let stream = tokio::net::UnixStream::from_std(std_stream)
+        .map_err(|err| PluginError::message(format!("host socket proxy wrap: {err}")))?;
+    let fence = Arc::new(AtomicBool::new(false));
+    bookclerk_workerd::socket_proxy::spawn_link(stream, policy, fence)
+        .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
+}
+
+/// Serve the guest CONNECT mux on two unidirectional overlapped pipes.
+#[cfg(windows)]
+#[allow(unsafe_code)] // NamedPipeClient::from_raw_handle takes the inherited pipe.
+fn serve_host_socket_proxy(
+    read: DuplexHalf,
+    write: DuplexHalf,
+    policy: bookclerk_plugin_manifest::EgressPolicy,
+) -> Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    let read = unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+            read.into_owned_handle().into_raw_handle(),
+        )
+    }
+    .map_err(|err| PluginError::message(format!("host proxy read pipe: {err}")))?;
+    let write = unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+            write.into_owned_handle().into_raw_handle(),
+        )
+    }
+    .map_err(|err| PluginError::message(format!("host proxy write pipe: {err}")))?;
+    let fence = Arc::new(AtomicBool::new(false));
+    bookclerk_workerd::socket_proxy::spawn_halves(read, write, policy, fence)
+        .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
 }
 
 #[cfg(unix)]
@@ -546,25 +598,16 @@ async fn windows_handoff_gateway(
     child: &mut Child,
     rpc_read: &DuplexHalf,
     rpc_write: &DuplexHalf,
-    proxy_read: &DuplexHalf,
-    proxy_write: &DuplexHalf,
 ) -> Result<()> {
     let target = process_handle(child)?;
     // Read half is guest → gateway. Write half is gateway → guest.
+    // The CONNECT mux stays in the host; this jail only receives guest RPC.
     let rpc_read_h = bookclerk_sandbox::duplicate_handle_into(rpc_read.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle gateway RPC read: {err}")))?;
     let rpc_write_h = bookclerk_sandbox::duplicate_handle_into(rpc_write.as_raw_handle(), target)
         .map_err(|err| {
         PluginError::message(format!("DuplicateHandle gateway RPC write: {err}"))
     })?;
-    let proxy_read_h = bookclerk_sandbox::duplicate_handle_into(proxy_read.as_raw_handle(), target)
-        .map_err(|err| {
-            PluginError::message(format!("DuplicateHandle gateway proxy read: {err}"))
-        })?;
-    let proxy_write_h =
-        bookclerk_sandbox::duplicate_handle_into(proxy_write.as_raw_handle(), target).map_err(
-            |err| PluginError::message(format!("DuplicateHandle gateway proxy write: {err}")),
-        )?;
     let handoff = JailHandoff {
         v: JailHandoff::VERSION,
         stdin: None,
@@ -577,14 +620,6 @@ async fn windows_handoff_gateway(
             JailHandoffExtra {
                 env: GATEWAY_GUEST_RPC_WRITE_ENV.into(),
                 handle: rpc_write_h,
-            },
-            JailHandoffExtra {
-                env: GATEWAY_PROXY_ENV.into(),
-                handle: proxy_read_h,
-            },
-            JailHandoffExtra {
-                env: bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV.into(),
-                handle: proxy_write_h,
             },
         ],
     };

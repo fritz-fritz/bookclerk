@@ -341,11 +341,13 @@ async fn run_isolate(
 ///
 /// The host spawned the native backend as a sibling jail. This launcher never
 /// sees the backend path: [`bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV`] is the
-/// Cap'n Proto link and [`bookclerk_sandbox::GATEWAY_PROXY_ENV`] is the muxed
-/// CONNECT proxy. On Windows the RPC link is two unidirectional pipes
-/// ([`bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV`] is the write half).
-/// Plugin input cannot choose either link. Only `describe` / `open` policy
-/// and `shutdown` pass through the adapter isolate.
+/// Cap'n Proto link. The production host serves the CONNECT mux itself
+/// (Windows AppContainers cannot dial host loopback). When
+/// [`bookclerk_sandbox::GATEWAY_PROXY_ENV`] is set, this process serves it
+/// instead — unjailed conformance spawns. On Windows the RPC link is two
+/// unidirectional pipes ([`bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV`]
+/// is the write half). Plugin input cannot choose either link. Only
+/// `describe` / `open` policy and `shutdown` pass through the adapter isolate.
 async fn run_native_behind_workerd(
     rpc_spec: &str,
     root: &Path,
@@ -357,26 +359,29 @@ async fn run_native_behind_workerd(
     use bookclerk_plugin_manifest::WorkerdLimits;
     use bookclerk_workerd::inherited_link::InheritedDuplex;
 
-    let proxy_spec = std::env::var(bookclerk_sandbox::GATEWAY_PROXY_ENV).with_context(|| {
-        format!(
-            "{} is required when {} is set",
-            bookclerk_sandbox::GATEWAY_PROXY_ENV,
-            bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV
-        )
-    })?;
+    let proxy_spec = std::env::var(bookclerk_sandbox::GATEWAY_PROXY_ENV).ok();
     #[cfg(not(windows))]
-    let proxy = InheritedDuplex::open(&proxy_spec).context("open inherited proxy link")?;
+    let proxy = match proxy_spec.as_deref() {
+        Some(spec) => Some(InheritedDuplex::open(spec).context("open inherited proxy link")?),
+        None => None,
+    };
     #[cfg(windows)]
-    let (proxy_read, proxy_write) = {
-        let write_spec =
-            std::env::var(bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV).with_context(|| {
-                format!(
-                    "{} is required on Windows",
-                    bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV
-                )
-            })?;
-        InheritedDuplex::open_halves(&proxy_spec, &write_spec)
-            .context("open inherited proxy pipes")?
+    let proxy_halves = match proxy_spec.as_deref() {
+        Some(spec) => {
+            let write_spec = std::env::var(bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV)
+                .with_context(|| {
+                    format!(
+                        "{} is required on Windows when {} is set",
+                        bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV,
+                        bookclerk_sandbox::GATEWAY_PROXY_ENV
+                    )
+                })?;
+            Some(
+                InheritedDuplex::open_halves(spec, &write_spec)
+                    .context("open inherited proxy pipes")?,
+            )
+        }
+        None => None,
     };
     #[cfg(windows)]
     let (guest_stdout, guest_stdin) = {
@@ -474,18 +479,22 @@ async fn run_native_behind_workerd(
 
     let socket_fence = Arc::new(AtomicBool::new(false));
     #[cfg(not(windows))]
-    bookclerk_workerd::socket_proxy::spawn_link(
-        proxy,
-        egress.policy().clone(),
-        Arc::clone(&socket_fence),
-    )?;
+    if let Some(proxy) = proxy {
+        bookclerk_workerd::socket_proxy::spawn_link(
+            proxy,
+            egress.policy().clone(),
+            Arc::clone(&socket_fence),
+        )?;
+    }
     #[cfg(windows)]
-    bookclerk_workerd::socket_proxy::spawn_halves(
-        proxy_read,
-        proxy_write,
-        egress.policy().clone(),
-        Arc::clone(&socket_fence),
-    )?;
+    if let Some((proxy_read, proxy_write)) = proxy_halves {
+        bookclerk_workerd::socket_proxy::spawn_halves(
+            proxy_read,
+            proxy_write,
+            egress.policy().clone(),
+            Arc::clone(&socket_fence),
+        )?;
+    }
 
     let result = mediate_native(
         generated.listen.port(),
