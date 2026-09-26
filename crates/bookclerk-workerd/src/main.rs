@@ -364,7 +364,20 @@ async fn run_native_behind_workerd(
             bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV
         )
     })?;
+    #[cfg(not(windows))]
     let proxy = InheritedDuplex::open(&proxy_spec).context("open inherited proxy link")?;
+    #[cfg(windows)]
+    let (proxy_read, proxy_write) = {
+        let write_spec =
+            std::env::var(bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV).with_context(|| {
+                format!(
+                    "{} is required on Windows",
+                    bookclerk_sandbox::GATEWAY_PROXY_WRITE_ENV
+                )
+            })?;
+        InheritedDuplex::open_halves(&proxy_spec, &write_spec)
+            .context("open inherited proxy pipes")?
+    };
     #[cfg(windows)]
     let (guest_stdout, guest_stdin) = {
         let write_spec = std::env::var(bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV)
@@ -460,8 +473,16 @@ async fn run_native_behind_workerd(
         .context("workerd bridge /health did not become ready")?;
 
     let socket_fence = Arc::new(AtomicBool::new(false));
+    #[cfg(not(windows))]
     bookclerk_workerd::socket_proxy::spawn_link(
         proxy,
+        egress.policy().clone(),
+        Arc::clone(&socket_fence),
+    )?;
+    #[cfg(windows)]
+    bookclerk_workerd::socket_proxy::spawn_halves(
+        proxy_read,
+        proxy_write,
         egress.policy().clone(),
         Arc::clone(&socket_fence),
     )?;

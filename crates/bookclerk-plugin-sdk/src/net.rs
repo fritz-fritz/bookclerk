@@ -19,6 +19,11 @@ use std::sync::Mutex;
 
 /// Env var set by `bookclerk-workerd` for native-behind-workerd guests.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+/// Windows write half of the inherited socket-proxy mux (`handle:<n>`).
+///
+/// Unset on Unix and in tests that pass one duplex `handle:`. Product spawns
+/// set it so the guest does not read and write the same named pipe.
+pub const SOCKET_PROXY_WRITE_ENV: &str = "BOOKCLERK_SOCKET_PROXY_WRITE";
 
 /// Optional fail-closed flag: deny ambient TCP when [`SOCKET_PROXY_ENV`] is unset.
 ///
@@ -405,6 +410,11 @@ fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
     if let Some(rest) = spec.strip_prefix("handle:") {
         #[cfg(windows)]
         {
+            if let Ok(write_spec) = std::env::var(SOCKET_PROXY_WRITE_ENV) {
+                if !write_spec.is_empty() {
+                    return mux_from_windows_halves(spec, &write_spec);
+                }
+            }
             let value: u64 = rest
                 .parse()
                 .map_err(|_| SdkError::message(format!("invalid handle link spec {spec}")))?;
@@ -452,6 +462,46 @@ fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
     };
     let (reader, writer) = tokio::io::split(pipe);
     Ok(crate::mux::Mux::client(reader, writer))
+}
+
+/// Multiplexes two unidirectional Windows handles (read, then write).
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when either spec is not a distinct `handle:<n>` or a
+/// handle cannot be wrapped.
+#[cfg(windows)]
+fn mux_from_windows_halves(read_spec: &str, write_spec: &str) -> Result<crate::mux::Mux> {
+    let read_id = windows_handle_id(read_spec)?;
+    let write_id = windows_handle_id(write_spec)?;
+    if read_id == write_id {
+        return Err(SdkError::message(
+            "socket proxy read and write handles must be distinct",
+        ));
+    }
+    let read = windows_pipe_client(read_id)?;
+    let write = windows_pipe_client(write_id)?;
+    Ok(crate::mux::Mux::client(read, write))
+}
+
+#[cfg(windows)]
+fn windows_handle_id(spec: &str) -> Result<u64> {
+    let rest = spec.strip_prefix("handle:").ok_or_else(|| {
+        SdkError::message(format!("socket proxy half must be handle:<n>, got {spec}"))
+    })?;
+    rest.parse()
+        .map_err(|_| SdkError::message(format!("invalid handle link spec {spec}")))
+}
+
+#[cfg(windows)]
+fn windows_pipe_client(value: u64) -> Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use std::os::windows::io::RawHandle;
+    unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+            value as usize as RawHandle,
+        )
+    }
+    .map_err(SdkError::from)
 }
 
 #[cfg(all(unix, target_os = "linux"))]

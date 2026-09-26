@@ -158,6 +158,27 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
     let (reader, writer) = tokio::io::split(link);
+    spawn_halves(reader, writer, policy, fence)
+}
+
+/// Serve HTTP CONNECT on mux halves that are already separate pipes.
+///
+/// Windows product spawns pass two unidirectional handles. Splitting one
+/// duplex pipe deadlocks the mux when a read and a write are in flight.
+///
+/// # Errors
+///
+/// Returns an error only if the accept task cannot be spawned (it does not).
+pub fn spawn_halves<R, W>(
+    reader: R,
+    writer: W,
+    policy: EgressPolicy,
+    fence: Arc<AtomicBool>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     let mux = bookclerk_plugin_sdk::mux::Mux::server(reader, writer);
     tokio::spawn(async move {
         loop {

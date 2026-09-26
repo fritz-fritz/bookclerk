@@ -161,6 +161,7 @@ async fn native_guest_reaches_only_granted_tcp_through_the_front_door() {
         assert_ne!(upper, "BOOKCLERK_GATEWAY_GUEST_RPC");
         assert_ne!(upper, "BOOKCLERK_GATEWAY_GUEST_RPC_WRITE");
         assert_ne!(upper, "BOOKCLERK_GATEWAY_PROXY");
+        assert_ne!(upper, "BOOKCLERK_GATEWAY_PROXY_WRITE");
         assert_ne!(upper, "BOOKCLERK_WORKERD_STATE_DIR");
         assert_ne!(upper, "BOOKCLERK_NATIVE_BACKEND");
     }
@@ -168,6 +169,12 @@ async fn native_guest_reaches_only_granted_tcp_through_the_front_door() {
     assert!(
         proxy.starts_with("fd:") || proxy.starts_with("handle:"),
         "SOCKET_PROXY must be an inherited link, got {proxy:?}"
+    );
+    #[cfg(windows)]
+    assert!(
+        keys.iter()
+            .any(|key| key.eq_ignore_ascii_case("BOOKCLERK_SOCKET_PROXY_WRITE")),
+        "guest missing SOCKET_PROXY_WRITE: {keys:?}"
     );
     step(&format!("guest env contract ok ({proxy})"));
 

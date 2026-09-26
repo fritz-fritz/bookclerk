@@ -27,7 +27,7 @@ gateway ends) so a blocking stdin read cannot lock stdout.
 | Link | Gateway env | Guest |
 | --- | --- | --- |
 | RPC (Cap'n Proto) | Unix `BOOKCLERK_GATEWAY_GUEST_RPC=fd:3`. Windows `BOOKCLERK_GATEWAY_GUEST_RPC=handle:<read>` and `BOOKCLERK_GATEWAY_GUEST_RPC_WRITE=handle:<write>` | stdin + stdout |
-| CONNECT mux | `BOOKCLERK_GATEWAY_PROXY=fd:4` / `handle:…` | `BOOKCLERK_SOCKET_PROXY=fd:3` / `handle:…` |
+| CONNECT mux | Unix `BOOKCLERK_GATEWAY_PROXY=fd:4`. Windows `BOOKCLERK_GATEWAY_PROXY=handle:<read>` and `BOOKCLERK_GATEWAY_PROXY_WRITE=handle:<write>` | Unix `BOOKCLERK_SOCKET_PROXY=fd:3`. Windows `BOOKCLERK_SOCKET_PROXY=handle:<read>` and `BOOKCLERK_SOCKET_PROXY_WRITE=handle:<write>` |
 
 `BOOKCLERK_WORKERD_STATE_DIR` is the host-owned `session-<nonce>/` directory
 (also the gateway `TMPDIR`). The guest `TMPDIR` is its own scratch, so it

@@ -86,13 +86,13 @@ impl InheritedDuplex {
         }
     }
 
-    /// Open the two unidirectional Windows handles that carry guest RPC.
+    /// Open two unidirectional Windows handles (read half, then write half).
     ///
-    /// `read_spec` is the gateway's overlapped read half (`handle:<n>`, guest
-    /// stdout). `write_spec` is the overlapped write half (guest stdin). They
-    /// must be distinct handles: one synchronous duplex locks a pending
-    /// `ReadFile` against `WriteFile` on the guest, so the second Cap'n Proto
-    /// call never completes.
+    /// Used for guest RPC and the socket-proxy mux. `read_spec` is this
+    /// process's overlapped read half (`handle:<n>`). `write_spec` is the
+    /// overlapped write half. They must be distinct handles: one duplex locks
+    /// a pending `ReadFile` against `WriteFile`, so the next frame never
+    /// completes.
     ///
     /// # Errors
     ///
@@ -109,10 +109,10 @@ impl InheritedDuplex {
         let read_id = handle_id(read_spec)?;
         let write_id = handle_id(write_spec)?;
         if read_id == write_id {
-            bail!("guest RPC read and write handles must be distinct (both {read_id})");
+            bail!("read and write handles must be distinct (both {read_id})");
         }
-        let read = Self::open(read_spec).context("open guest RPC read half")?;
-        let write = Self::open(write_spec).context("open guest RPC write half")?;
+        let read = Self::open(read_spec).context("open inherited read half")?;
+        let write = Self::open(write_spec).context("open inherited write half")?;
         let Self::Pipe(read_pipe) = read;
         let Self::Pipe(write_pipe) = write;
         Ok((Box::new(read_pipe), Box::new(write_pipe)))
@@ -161,7 +161,7 @@ fn open_fd(fd: i32, spec: &str) -> Result<InheritedDuplex> {
 fn handle_id(spec: &str) -> Result<u64> {
     match LinkSpec::parse(spec).with_context(|| format!("parse inherited link `{spec}`"))? {
         LinkSpec::Handle(value) => Ok(value),
-        LinkSpec::Fd(_) => bail!("Windows guest RPC half must be handle:<n>, got `{spec}`"),
+        LinkSpec::Fd(_) => bail!("Windows inherited half must be handle:<n>, got `{spec}`"),
     }
 }
 

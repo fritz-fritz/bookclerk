@@ -3,9 +3,10 @@
 //! Native-behind-workerd siblings never open each other by name. The host
 //! creates the guest RPC link and the multiplexed socket-proxy link, keeps
 //! every end `CLOEXEC` / non-inheritable, and delivers the child ends.
-//! On Unix both links are duplex sockets. On Windows the proxy stays one
-//! overlapped duplex; guest RPC is two unidirectional pipes so a synchronous
-//! stdin read cannot lock stdout.
+//! On Unix both links are duplex sockets. On Windows each link is two
+//! unidirectional pipes so a pending read cannot lock a write. Guest RPC
+//! keeps synchronous guest ends (Rust std aborts on overlapped stdin). The
+//! proxy mux uses overlapped ends on both peers.
 //!
 //! - **Unix:** [`inherit_fd_at`] from `Command::pre_exec` (`dup2` onto a fixed
 //!   child fd). Concurrent spawns cannot inherit another session's link.
@@ -35,9 +36,25 @@ pub const GATEWAY_GUEST_RPC_ENV: &str = "BOOKCLERK_GATEWAY_GUEST_RPC";
 /// where [`GATEWAY_GUEST_RPC_ENV`] is a full-duplex socket.
 pub const GATEWAY_GUEST_RPC_WRITE_ENV: &str = "BOOKCLERK_GATEWAY_GUEST_RPC_WRITE";
 /// Env var naming the multiplexed CONNECT-proxy link for `bookclerk-workerd`.
+///
+/// Unix: one duplex socket, `fd:<n>`. Windows: the gateway's overlapped read
+/// half, `handle:<n>`. The write half is [`GATEWAY_PROXY_WRITE_ENV`].
 pub const GATEWAY_PROXY_ENV: &str = "BOOKCLERK_GATEWAY_PROXY";
+/// Windows-only env var naming the gateway's overlapped write half of the proxy.
+///
+/// Absent on Unix, where [`GATEWAY_PROXY_ENV`] is a full-duplex socket.
+pub const GATEWAY_PROXY_WRITE_ENV: &str = "BOOKCLERK_GATEWAY_PROXY_WRITE";
 /// Env var naming the socket-proxy link for a native guest (SDK `net::connect`).
+///
+/// Unix: one duplex socket, `fd:<n>`. Windows product spawns name the guest's
+/// overlapped read half here; the write half is [`SOCKET_PROXY_WRITE_ENV`].
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+/// Windows-only env var naming the guest's overlapped write half of the proxy.
+///
+/// The SDK still accepts a single `handle:<n>` duplex when this is unset
+/// (unit tests). Product spawns set both halves so a pending read cannot lock
+/// a write on the same pipe.
+pub const SOCKET_PROXY_WRITE_ENV: &str = "BOOKCLERK_SOCKET_PROXY_WRITE";
 /// When `1`, `bookclerk-jail` reads one [`JailHandoff`] JSON line from stdin.
 pub const JAIL_HANDOFF_ENV: &str = "BOOKCLERK_JAIL_HANDOFF";
 /// Host-chosen workerd session directory (`0700`, under `$TMPDIR`).
@@ -349,7 +366,7 @@ impl StdioEnds {
         }
         #[cfg(windows)]
         {
-            windows::stdio_pair()
+            windows::stdio_pair(false)
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -358,6 +375,22 @@ impl StdioEnds {
                 "StdioEnds requires Unix or Windows",
             ))
         }
+    }
+
+    /// Two unidirectional pipes whose guest ends are overlapped.
+    ///
+    /// The socket-proxy mux reads and writes at the same time from both
+    /// peers. A single duplex pipe deadlocks that mux on Windows. Each end
+    /// here is only read or only written, and every handle is overlapped so
+    /// Tokio can wrap it. Guest stdio RPC uses [`pair`] instead, because Rust
+    /// std aborts on an overlapped stdin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when a pipe cannot be created.
+    #[cfg(windows)]
+    pub fn pair_overlapped() -> io::Result<Self> {
+        windows::stdio_pair(true)
     }
 }
 
@@ -690,7 +723,10 @@ mod windows {
         ))
     }
 
-    fn unidirectional(host_writes: bool) -> io::Result<(OwnedHandle, OwnedHandle)> {
+    fn unidirectional(
+        host_writes: bool,
+        server_overlapped: bool,
+    ) -> io::Result<(OwnedHandle, OwnedHandle)> {
         let name = random_pipe_name(if host_writes { "si" } else { "so" });
         let name_w = wide(&name);
         let access = if host_writes {
@@ -698,13 +734,19 @@ mod windows {
         } else {
             PIPE_ACCESS_OUTBOUND
         };
-        // Server is the guest-synchronous end for the child's std handle.
-        // Host end (CreateFile) is overlapped so tokio / overlapped I/O works
-        // in bookclerk-workerd.
+        // Server is the guest end. Host end (CreateFile) is always overlapped.
+        // Guest stdio keeps the server synchronous. The proxy mux sets
+        // `server_overlapped` so both Tokio peers can use the pipe, one
+        // direction per handle.
+        let mode = if server_overlapped {
+            access | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED
+        } else {
+            access | FILE_FLAG_FIRST_PIPE_INSTANCE
+        };
         let server = unsafe {
             CreateNamedPipeW(
                 PCWSTR(name_w.as_ptr()),
-                access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 16 * 1024,
@@ -752,9 +794,9 @@ mod windows {
         Ok((owned(client)?, owned(server)?))
     }
 
-    pub(super) fn stdio_pair() -> io::Result<StdioEnds> {
-        let (host_stdin, guest_stdin) = unidirectional(true)?;
-        let (host_stdout, guest_stdout) = unidirectional(false)?;
+    pub(super) fn stdio_pair(server_overlapped: bool) -> io::Result<StdioEnds> {
+        let (host_stdin, guest_stdin) = unidirectional(true, server_overlapped)?;
+        let (host_stdout, guest_stdout) = unidirectional(false, server_overlapped)?;
         Ok(StdioEnds {
             host_stdin: DuplexHalf { handle: host_stdin },
             host_stdout: DuplexHalf {
