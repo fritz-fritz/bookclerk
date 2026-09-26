@@ -712,9 +712,16 @@ fn inherited_pipe_echoes_under_deny_and_tcp_is_refused() {
     use std::io::{Read, Write};
     use std::os::windows::io::AsRawHandle;
     use std::process::Stdio;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    struct StopAccept(Arc<AtomicBool>);
+    impl Drop for StopAccept {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     let _serial = begin_appcontainer_test();
     let root = tempfile::tempdir().expect("tempdir");
@@ -724,18 +731,25 @@ fn inherited_pipe_echoes_under_deny_and_tcp_is_refused() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
     let port = listener.local_addr().expect("addr").port();
+    listener.set_nonblocking(true).expect("nonblocking");
     let accepts = Arc::new(AtomicUsize::new(0));
     let accept_count = Arc::clone(&accepts);
+    let stop_accept = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop_accept);
     thread::spawn(move || {
-        let _ = listener.set_nonblocking(true);
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(20) {
-            if listener.accept().is_ok() {
-                accept_count.fetch_add(1, Ordering::SeqCst);
+        while !stop_flag.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok(_) => {
+                    accept_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
             }
             thread::sleep(Duration::from_millis(20));
         }
     });
+    // Keep the listener open until this guard drops, including after a panic.
+    let _stop_accept = StopAccept(stop_accept);
 
     let (host_end, guest_end) = bookclerk_sandbox::DuplexLink::pair().expect("duplex");
     let mut child = Command::new(JAIL)

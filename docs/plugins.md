@@ -606,8 +606,10 @@ Plugin hosts create the AppContainer profile up front, put
 `windows_profile_name` on the jail `Spec`, and delete the profile when the
 plugin client drops. Native-behind-workerd sessions create **two** profiles
 (gateway + guest) and one session Job that both `bookclerk-jail.exe`
-processes join. Media jobs leave that field unset so the jail creates a
-unique profile per job.
+processes join. The host starts the guest jail only after the gateway jail
+has `CreateProcess`ed its child, so the two launches do not hold
+`Local\bookclerk-dacl-tx` at the same time. Media jobs leave that field unset
+so the jail creates a unique profile per job.
 
 Fetch scratch and plugin state are the spawn-time `data` / `tmp` grants (already
 ACLed for the Package SID). SQLite adds file-level ACLs for `library.db` and

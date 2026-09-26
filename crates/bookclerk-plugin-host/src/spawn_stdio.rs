@@ -364,12 +364,28 @@ async fn spawn_siblings(
     let mut gateway = gateway_cmd.spawn().map_err(|err| {
         PluginError::message(format!("could not start gateway for `{id}`: {err}"))
     })?;
+    // Created before the handoff so the jail cannot finish CreateProcess
+    // first and miss the event.
+    #[cfg(windows)]
+    let jail_ready = {
+        let pid = gateway.id().ok_or_else(|| {
+            PluginError::message(format!("gateway for `{id}` did not report a pid"))
+        })?;
+        bookclerk_sandbox::JailReady::create(pid).map_err(|err| {
+            PluginError::message(format!("could not create the jail-ready event: {err}"))
+        })?
+    };
     if let Some(stderr) = gateway.stderr.take() {
         forward_guest_stderr(id.to_string(), "gateway", stderr, Arc::clone(&stderr_tail));
     }
 
     #[cfg(windows)]
     {
+        // Join the session Job before the handoff. The jail blocks on that
+        // line, so its child is created only after the jail is already in the Job.
+        if let Some(job) = session_job.as_ref() {
+            assign_job(job, &gateway)?;
+        }
         if let Err(err) =
             windows_handoff_gateway(&mut gateway, &rpc_pipes.host_stdout, &rpc_pipes.host_stdin)
                 .await
@@ -377,8 +393,37 @@ async fn spawn_siblings(
             let _ = gateway.kill().await;
             return Err(err);
         }
-        if let Some(job) = session_job.as_ref() {
-            assign_job(job, &gateway)?;
+        let ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match jail_ready.is_signaled() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = gateway.kill().await;
+                    return Err(PluginError::message(format!(
+                        "jail-ready wait failed for `{id}`: {err}\n{}",
+                        spawn_failure_detail(&mut gateway, None, &stderr_tail)
+                    )));
+                }
+            }
+            if gateway
+                .try_wait()
+                .map_err(|err| PluginError::message(format!("gateway wait: {err}")))?
+                .is_some()
+            {
+                return Err(PluginError::message(format!(
+                    "gateway for `{id}` exited before its child started\n{}",
+                    spawn_failure_detail(&mut gateway, None, &stderr_tail)
+                )));
+            }
+            if tokio::time::Instant::now() >= ready_deadline {
+                let _ = gateway.kill().await;
+                return Err(PluginError::message(format!(
+                    "gateway for `{id}` did not start its child within 60s\n{}",
+                    spawn_failure_detail(&mut gateway, None, &stderr_tail)
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
@@ -399,6 +444,13 @@ async fn spawn_siblings(
 
     #[cfg(windows)]
     {
+        if let Some(job) = session_job.as_ref() {
+            if let Err(err) = assign_job(job, &guest) {
+                let _ = gateway.kill().await;
+                let _ = guest.kill().await;
+                return Err(err);
+            }
+        }
         if let Err(err) = windows_handoff_guest(
             &mut guest,
             &rpc_pipes.guest_stdin,
@@ -411,13 +463,6 @@ async fn spawn_siblings(
             let _ = gateway.kill().await;
             let _ = guest.kill().await;
             return Err(err);
-        }
-        if let Some(job) = session_job.as_ref() {
-            if let Err(err) = assign_job(job, &guest) {
-                let _ = gateway.kill().await;
-                let _ = guest.kill().await;
-                return Err(err);
-            }
         }
     }
     #[cfg(unix)]

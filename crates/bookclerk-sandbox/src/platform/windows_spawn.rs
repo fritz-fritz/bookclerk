@@ -932,6 +932,9 @@ fn run_appcontainer_windows(
             });
         }
     };
+    // Grants are done. Let a sibling jail's ACL proceed. The event is
+    // session-local and is not inherited by the AppContainer child.
+    signal_jail_ready();
 
     let mut child_stdin = io.stdin.take();
     let mut child_stdout = io.stdout.take();
@@ -1031,6 +1034,7 @@ fn run_unconfined_windows(
         backend: "appcontainer",
         detail: format!("CreateProcess (unconfined handoff) failed: {err}"),
     })?;
+    signal_jail_ready();
     let mut child_stdin = io.stdin.take();
     let mut child_stdout = io.stdout.take();
     let mut child_stderr = io.stderr.take();
@@ -1484,6 +1488,113 @@ impl Drop for AclApiLock {
             self.named = HANDLE::default();
         }
     }
+}
+
+/// Session-local event signaled after this process `CreateProcess`es its child.
+///
+/// The plugin host creates one named `Local\bookclerk-jail-ready-<pid>` event
+/// before it writes the jail handoff, then waits until this process signals
+/// it after `CreateProcess`. That sequences sibling `bookclerk-jail` processes
+/// so their DACL grants do not overlap for the whole 30s
+/// `Local\bookclerk-dacl-tx` timeout.
+/// The event is not placed on the AppContainer handle list and its default
+/// DACL does not grant the Package SID.
+#[cfg(windows)]
+pub struct JailReady {
+    /// Manual-reset event handle stored as an integer so the value is `Send`.
+    handle: isize,
+}
+
+#[cfg(windows)]
+impl JailReady {
+    /// Create an unsignaled manual-reset event named for `pid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `CreateEventW` fails.
+    pub fn create(pid: u32) -> std::io::Result<Self> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Threading::CreateEventW;
+
+        let name = jail_ready_name(pid);
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }
+            .map_err(std::io::Error::other)?;
+        Ok(Self {
+            handle: event.0 as isize,
+        })
+    }
+
+    /// `true` when the jail has signaled the event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `WaitForSingleObject` fails.
+    pub fn is_signaled(&self) -> std::io::Result<bool> {
+        use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        let wait = unsafe { WaitForSingleObject(self.as_handle(), 0) };
+        if wait == WAIT_OBJECT_0 {
+            Ok(true)
+        } else if wait == WAIT_TIMEOUT {
+            Ok(false)
+        } else {
+            Err(std::io::Error::other(format!(
+                "WaitForSingleObject(jail ready) returned {wait:?}"
+            )))
+        }
+    }
+
+    /// Raw event handle for `WaitForSingleObject`.
+    fn as_handle(&self) -> windows::Win32::Foundation::HANDLE {
+        windows::Win32::Foundation::HANDLE(self.handle as *mut std::ffi::c_void)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JailReady {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(self.as_handle());
+            }
+            self.handle = 0;
+        }
+    }
+}
+
+/// NUL-terminated `Local\bookclerk-jail-ready-<pid>` name.
+#[cfg(windows)]
+fn jail_ready_name(pid: u32) -> Vec<u16> {
+    format!("Local\\bookclerk-jail-ready-{pid}")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Signal [`JailReady`] for this process when the host created one.
+///
+/// Missing event is success: jail tests and media launches have no waiter.
+#[cfg(windows)]
+fn signal_jail_ready() {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, OpenEventW, SetEvent, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE,
+    };
+
+    let name = jail_ready_name(unsafe { GetCurrentProcessId() });
+    let Ok(event) = (unsafe {
+        OpenEventW(
+            EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            PCWSTR(name.as_ptr()),
+        )
+    }) else {
+        return;
+    };
+    let _ = unsafe { SetEvent(event) };
+    let _ = unsafe { CloseHandle(event) };
 }
 
 /// Build CreateProcess `lpCommandLine` including argv[0].
@@ -2115,5 +2226,14 @@ mod tests {
             sid,
             Some(packages.as_path())
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jail_ready_event_starts_clear_and_signals() {
+        let ready = JailReady::create(std::process::id()).expect("create");
+        assert!(!ready.is_signaled().expect("poll"));
+        signal_jail_ready();
+        assert!(ready.is_signaled().expect("signaled"));
     }
 }
