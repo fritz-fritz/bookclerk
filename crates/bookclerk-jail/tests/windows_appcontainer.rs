@@ -44,7 +44,7 @@ fn assert_spawn_capable() {
 /// Serializes this file's tests onto one rustc test thread.
 ///
 /// Each jailed child contends for session mutex `Local\bookclerk-dacl-tx`
-/// (30s fail-closed). Parallel tests in this binary otherwise time out
+/// (120s fail-closed). Parallel tests in this binary otherwise time out
 /// waiting for a sibling's ACL grant/revoke.
 fn begin_appcontainer_test() -> MutexGuard<'static, ()> {
     assert_spawn_capable();

@@ -599,8 +599,12 @@ System32 / WinSxS / Program Files / ProgramData\Microsoft, resolved via
 runtime access (loading system DLLs / `cmd.exe`) comes from existing OS ACLs
 such as ALL APPLICATION PACKAGES. Explicit policy paths are temporarily ACLed
 for the Package SID. Cross-process DACL read/modify/write is serialized with the
-named mutex `Local\bookclerk-dacl-tx` (plus an in-process lock). Revoking an ACE
-does **not** invalidate handles the guest already opened.
+named mutex `Local\bookclerk-dacl-tx` (plus an in-process lock; 120s fail-closed
+wait). Ancestor traverse ACEs (`FILE_TRAVERSE`, no inheritance) are written
+with `SetKernelObjectSecurity` so Windows does not propagate inheritable ACEs
+through large parents such as the user temp directory or a build tree while
+the mutex is held. Leaf directory grants still inherit onto their children.
+Revoking an ACE does **not** invalidate handles the guest already opened.
 
 Plugin hosts create the AppContainer profile up front, put
 `windows_profile_name` on the jail `Spec`, and delete the profile when the

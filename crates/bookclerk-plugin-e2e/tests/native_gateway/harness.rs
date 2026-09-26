@@ -19,7 +19,12 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub const PLUGIN_ID: &str = "native_gateway_probe";
-pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Outer bound for `PluginSession::spawn_with`.
+///
+/// On Windows this must outlast the host jail-ready wait (180s), which itself
+/// outlasts the DACL mutex wait (120s), so a queued sibling launch fails in
+/// the jail instead of being killed by this deadline first.
+pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(240);
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(45);
 pub const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const EXIT_TIMEOUT: Duration = Duration::from_secs(30);

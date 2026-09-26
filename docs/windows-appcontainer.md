@@ -66,8 +66,12 @@ does **not** synthesize a Packages path when the API fails.
 
 ## Cross-process ACL sync
 
-Named mutex `Local\bookclerk-dacl-tx` (30s timeout) around every DACL RMW,
-plus an in-process mutex. Revoke does not invalidate already-open handles.
+Named mutex `Local\bookclerk-dacl-tx` (120s timeout, fail closed) around every
+DACL RMW, plus an in-process mutex. Ancestor traverse ACEs are written with
+`SetKernelObjectSecurity` so inheritable ACEs already on a broad parent
+(`%TEMP%`, a build directory) are not propagated to every child while that
+mutex is held. Leaf directory grants still use inheritable ACEs.
+Revoke does not invalidate already-open handles.
 
 ## Interactive listen / OAuth callbacks
 

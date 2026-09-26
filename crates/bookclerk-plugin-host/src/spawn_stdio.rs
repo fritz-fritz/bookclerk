@@ -381,6 +381,10 @@ async fn spawn_siblings(
 
     #[cfg(windows)]
     {
+        // Longer than the jail's `Local\bookclerk-dacl-tx` wait (120s) so a
+        // launch queued behind other grants is not killed while it still holds
+        // or waits for that mutex. The e2e spawn deadline is longer than this.
+        const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
         // Join the session Job before the handoff. The jail blocks on that
         // line, so its child is created only after the jail is already in the Job.
         if let Some(job) = session_job.as_ref() {
@@ -393,7 +397,7 @@ async fn spawn_siblings(
             let _ = gateway.kill().await;
             return Err(err);
         }
-        let ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let ready_deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             match jail_ready.is_signaled() {
                 Ok(true) => break,
@@ -419,7 +423,8 @@ async fn spawn_siblings(
             if tokio::time::Instant::now() >= ready_deadline {
                 let _ = gateway.kill().await;
                 return Err(PluginError::message(format!(
-                    "gateway for `{id}` did not start its child within 60s\n{}",
+                    "gateway for `{id}` did not start its child within {}s\n{}",
+                    READY_TIMEOUT.as_secs(),
                     spawn_failure_detail(&mut gateway, None, &stderr_tail)
                 )));
             }
