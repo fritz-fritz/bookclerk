@@ -662,54 +662,65 @@ mod windows {
         Ok(unsafe { OwnedHandle::from_raw_handle(handle.0 as RawHandle) })
     }
 
+    /// True when `err` is the Win32 code the `windows` crate stored on `BOOL::ok`.
+    ///
+    /// That wrapper reads `GetLastError` and then calls `GetErrorInfo`, which can
+    /// replace the thread's last-error. A later `GetLastError` is not the pipe
+    /// status.
+    fn is_win32(err: &windows::core::Error, code: u32) -> bool {
+        err.code() == windows::core::HRESULT::from_win32(code)
+    }
+
     /// Complete `ConnectNamedPipe` after the client `CreateFile` has connected.
     ///
     /// A synchronous server may pass a null overlapped pointer. An overlapped
     /// server must pass a real `OVERLAPPED`: a null pointer can report success
     /// while the instance is still listening, and later `ReadFile`/`WriteFile`
-    /// then wait forever.
+    /// then wait forever. `ERROR_PIPE_CONNECTED` means the client already
+    /// attached, which is success.
     fn finish_connect(server: HANDLE, server_overlapped: bool) -> io::Result<()> {
-        use windows::Win32::Foundation::{
-            GetLastError, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, WAIT_OBJECT_0,
-        };
+        use windows::Win32::Foundation::{ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, WAIT_OBJECT_0};
         use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-        use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+        use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
         if !server_overlapped {
-            let connected = unsafe { ConnectNamedPipe(server, None) };
-            if connected.is_ok() {
-                return Ok(());
-            }
-            let err = io::Error::last_os_error();
-            return if err.raw_os_error() == Some(ERROR_PIPE_CONNECTED.0 as i32) {
-                Ok(())
-            } else {
-                Err(err)
+            return match unsafe { ConnectNamedPipe(server, None) } {
+                Ok(()) => Ok(()),
+                Err(err) if is_win32(&err, ERROR_PIPE_CONNECTED.0) => Ok(()),
+                Err(err) => Err(io::Error::other(err)),
             };
         }
 
         let event =
             unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.map_err(io::Error::other)?;
-        let mut overlapped = OVERLAPPED::default();
-        overlapped.hEvent = event;
+        let mut overlapped = OVERLAPPED {
+            hEvent: event,
+            ..OVERLAPPED::default()
+        };
         let connected = unsafe { ConnectNamedPipe(server, Some(ptr::addr_of_mut!(overlapped))) };
-        if connected.is_ok() {
-            close_if_valid(event);
-            return Ok(());
-        }
-        let err = unsafe { GetLastError() };
-        if err == ERROR_PIPE_CONNECTED {
-            close_if_valid(event);
-            return Ok(());
-        }
-        if err != ERROR_IO_PENDING {
-            close_if_valid(event);
-            return Err(io::Error::from_raw_os_error(err.0 as i32));
+        match connected {
+            Ok(()) => {
+                close_if_valid(event);
+                return Ok(());
+            }
+            Err(err) if is_win32(&err, ERROR_PIPE_CONNECTED.0) => {
+                close_if_valid(event);
+                return Ok(());
+            }
+            Err(err) if is_win32(&err, ERROR_IO_PENDING.0) => {}
+            Err(err) => {
+                close_if_valid(event);
+                return Err(io::Error::other(err));
+            }
         }
         // The client handle already exists, so this should complete immediately.
-        // Bound the wait so a stuck instance cannot wedge the host.
+        // Bound the wait so a stuck instance cannot wedge the host. Cancel
+        // before returning: `overlapped` must not be dropped while I/O is pending.
         let wait = unsafe { WaitForSingleObject(event, 5_000) };
         if wait != WAIT_OBJECT_0 {
+            let _ = unsafe { CancelIoEx(server, Some(ptr::addr_of!(overlapped))) };
+            let mut transferred = 0u32;
+            let _ = unsafe { GetOverlappedResult(server, &overlapped, &mut transferred, true) };
             close_if_valid(event);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -717,12 +728,13 @@ mod windows {
             ));
         }
         let mut transferred = 0u32;
-        let result = unsafe {
-            GetOverlappedResult(server, &overlapped, &mut transferred, false)
-                .map_err(io::Error::other)
-        };
+        let result = unsafe { GetOverlappedResult(server, &overlapped, &mut transferred, false) };
         close_if_valid(event);
-        result
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) if is_win32(&err, ERROR_PIPE_CONNECTED.0) => Ok(()),
+            Err(err) => Err(io::Error::other(err)),
+        }
     }
 
     /// Duplex overlapped pipe; both ends `FILE_FLAG_OVERLAPPED`, max 1 instance.
