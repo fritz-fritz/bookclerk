@@ -476,6 +476,10 @@ async fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
 ///
 /// The host cleared it so `exec` could deliver the link. Grandchildren must
 /// not inherit it.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when `F_GETFD` or `F_SETFD` fails.
 #[cfg(unix)]
 pub(crate) fn set_inherited_cloexec(fd: i32) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -495,6 +499,11 @@ pub(crate) fn set_inherited_cloexec(fd: i32) -> Result<()> {
 }
 
 /// Writes [`SESSION_CHALLENGE_ENV`] when set, then starts the client mux.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the challenge is set but is not 32 bytes of hex,
+/// or when writing those bytes fails.
 #[cfg(any(unix, windows))]
 async fn finish_client_mux<R, W>(reader: R, mut writer: W) -> Result<crate::mux::Mux>
 where

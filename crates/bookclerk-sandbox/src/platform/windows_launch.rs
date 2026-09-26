@@ -586,6 +586,7 @@ enum JobConfigError {
 }
 
 impl JobConfigError {
+    /// Classifies `err` as unsupported or failed, keeping the Win32 code.
     fn from_win(stage: &str, err: &windows::core::Error) -> Self {
         let rendered = render_win_error(err);
         let detail = format!("{stage}: {}", rendered.display_code());
@@ -596,6 +597,7 @@ impl JobConfigError {
         }
     }
 
+    /// Maps this failure onto a sandbox launch error for `configure_job`.
     fn into_sandbox(self) -> SandboxError {
         match self {
             Self::Unsupported(detail) | Self::Failed(detail) => {
@@ -604,6 +606,7 @@ impl JobConfigError {
         }
     }
 
+    /// Maps this failure onto an I/O error for session-Job setup.
     fn into_io(self) -> std::io::Error {
         match self {
             Self::Unsupported(detail) => {
@@ -969,6 +972,7 @@ struct RenderedWinError {
 }
 
 impl RenderedWinError {
+    /// `win32=<code> hresult=<0x........>` with no command line or environment.
     fn display_code(&self) -> String {
         format!("win32={} hresult={:#010x}", self.win32, self.hresult as u32)
     }
@@ -983,6 +987,7 @@ const WIN32_INVALID_FUNCTION: u32 = 1;
 /// `ERROR_CALL_NOT_IMPLEMENTED`.
 const WIN32_CALL_NOT_IMPLEMENTED: u32 = 120;
 
+/// Splits `err` into a Win32 code and an HRESULT, marking unimplemented codes.
 fn render_win_error(err: &windows::core::Error) -> RenderedWinError {
     let hresult = err.code().0;
     let bits = hresult as u32;
@@ -1025,6 +1030,11 @@ fn query_job_diag(job: HANDLE, process: Option<HANDLE>) -> String {
     format!("job active={active} limit={limit} member={member}")
 }
 
+/// Active process count from `JobObjectBasicAccountingInformation`.
+///
+/// # Errors
+///
+/// Returns the Win32 error text when the query fails.
 fn query_active_processes(job: HANDLE) -> Result<u32, String> {
     unsafe {
         let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
@@ -1040,6 +1050,12 @@ fn query_active_processes(job: HANDLE) -> Result<u32, String> {
     }
 }
 
+/// `ActiveProcessLimit` when that Job limit is enabled.
+///
+/// # Errors
+///
+/// Returns the Win32 error text when the query fails. `Ok(None)` means the
+/// limit flag is unset.
 fn query_active_process_limit(job: HANDLE) -> Result<Option<u32>, String> {
     unsafe {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -1060,6 +1076,11 @@ fn query_active_process_limit(job: HANDLE) -> Result<Option<u32>, String> {
     }
 }
 
+/// Whether `process` is a member of `job`.
+///
+/// # Errors
+///
+/// Returns the Win32 error text when `IsProcessInJob` fails.
 fn query_in_job(job: HANDLE, process: HANDLE) -> Result<bool, String> {
     let mut inside = BOOL(0);
     unsafe {
@@ -1068,6 +1089,12 @@ fn query_in_job(job: HANDLE, process: HANDLE) -> Result<bool, String> {
     Ok(inside.as_bool())
 }
 
+/// Enabled CPU-rate control on `job`, if the kernel implements the query.
+///
+/// # Errors
+///
+/// Returns the rendered Win32 code when the query fails for a reason other
+/// than missing support. `Ok(None)` means the control is unimplemented or off.
 fn query_cpu_control(job: HANDLE) -> Result<Option<SessionCpuControl>, String> {
     unsafe {
         let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();

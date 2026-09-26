@@ -403,6 +403,11 @@ struct Header {
 
 /// Reads the length and the fixed header. An illegal length returns before any
 /// payload buffer is allocated.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the peer closes early, the read fails, or the
+/// length is shorter than the fixed header or longer than [`MAX_FRAME_PAYLOAD`].
 async fn read_header<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Header> {
     let len = reader.read_u32().await.map_err(io_err)?;
     if len < 5 || (len as usize) > MAX_FRAME_PAYLOAD + 5 {
@@ -419,6 +424,11 @@ async fn read_header<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Header> {
 }
 
 /// Consumes `n` payload bytes through a fixed stack buffer.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the peer closes before `n` bytes arrive or the
+/// read fails.
 async fn discard<R: AsyncRead + Unpin>(reader: &mut R, mut n: usize) -> Result<()> {
     let mut buf = [0u8; 8192];
     while n > 0 {
@@ -429,6 +439,12 @@ async fn discard<R: AsyncRead + Unpin>(reader: &mut R, mut n: usize) -> Result<(
     Ok(())
 }
 
+/// Demultiplexes frames until the peer closes or a frame is rejected.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when a frame header or payload cannot be read, or when
+/// an Open uses a duplicate id, the wrong parity, or a closed accept channel.
 async fn reader_task<R: AsyncRead + Unpin>(
     mut reader: R,
     shared: Arc<Shared>,
@@ -601,6 +617,11 @@ async fn writer_task<W: AsyncWrite + Unpin>(
     }
 }
 
+/// Writes one queued Data or Close frame.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the underlying write or flush fails.
 async fn write_out_data<W: AsyncWrite + Unpin>(writer: &mut W, data: OutData) -> Result<()> {
     match data {
         OutData::Bytes { id, payload } => write_raw(writer, TYPE_DATA, id, &payload).await,

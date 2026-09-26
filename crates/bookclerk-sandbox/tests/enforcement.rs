@@ -571,7 +571,6 @@ impl Drop for RemoveDir<'_> {
 /// Bind and connect inside `ipc`; refuse both against `outside`.
 #[cfg(target_os = "macos")]
 fn child_guest_pathname_ipc(ipc: &Path, outside: &Path) -> Result<(), String> {
-    use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::time::Duration;
 
