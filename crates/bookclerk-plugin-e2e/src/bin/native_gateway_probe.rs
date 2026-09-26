@@ -163,6 +163,45 @@ async fn hold_until_eof(host: &str, port: u16, payload: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Fork a sleeper that stays in this process group. `exec` is denied, so the
+/// child only calls `pause`. Windows observes the jail's child instead.
+fn spawn_pause_descendant() -> serde_json::Value {
+    #[cfg(unix)]
+    {
+        let pid = spawn_pause_child();
+        if pid > 0 {
+            serde_json::json!({ "ok": true, "pid": pid })
+        } else {
+            serde_json::json!({ "ok": false, "error": format!("fork returned {pid}") })
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        serde_json::json!({
+            "ok": false,
+            "error": "the Windows jail process keeps the probe as its child",
+        })
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)] // `fork` + `pause`; the child never returns into the runtime.
+fn spawn_pause_child() -> i32 {
+    extern "C" {
+        fn fork() -> i32;
+        fn pause() -> i32;
+    }
+    unsafe {
+        let pid = fork();
+        if pid == 0 {
+            loop {
+                pause();
+            }
+        }
+        pid
+    }
+}
+
 fn ambient(host: &str, port: u16) -> Result<(), String> {
     let addr: std::net::SocketAddr = format!("{host}:{port}")
         .parse()
@@ -212,6 +251,7 @@ impl PluginCli for Probe {
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 serde_json::json!({ "ok": true })
             }
+            "descendant" => spawn_pause_descendant(),
             "read_path" => {
                 let path = arg(&params, "payload");
                 match std::fs::read(path) {

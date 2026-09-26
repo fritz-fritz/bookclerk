@@ -14,8 +14,9 @@ use bookclerk_plugin_host::{
 };
 use bookclerk_plugin_sdk::CliInvokeParams;
 use ng_harness::{
-    kill_pid, linux_fd_count, open_session, probe, process_alive, session_dirs_under, step,
-    wait_for_exit, Install, Listener, SPAWN_TIMEOUT,
+    kill_pid, linux_fd_count, linux_session_cgroup, open_session, probe, process_alive,
+    session_dirs_under, step, wait_for_exit, Install, Listener, ProcessTree, SETTLE_TIMEOUT,
+    SPAWN_TIMEOUT,
 };
 
 /// Serializes tests in this binary. `missing_workerd_fails_closed` replaces
@@ -390,50 +391,30 @@ async fn revoke_during_initial_describe_fails_the_spawn() {
 async fn sequential_and_concurrent_spawn_cycles_do_not_leak() {
     let _env = workerd_bin_lock().await;
     let fds_before = linux_fd_count();
+    let listener = Listener::bind(true).await;
+    let install = Install::new(listener.port);
+    assert!(
+        install.files_dir().is_dir(),
+        "installation parent missing before churn"
+    );
     for i in 0..20 {
-        let listener = Listener::bind(true).await;
-        let install = Install::new(listener.port);
-        let session = install.spawn().await;
-        open_session(&session).await;
-        let payload = format!("cycle-{i}");
-        let outcome = probe(&session, "connect", listener.port, &payload).await;
-        assert_eq!(outcome["ok"], true, "cycle {i}: {outcome}");
-        let gateway = session.gateway_pid().expect("gateway");
-        let guest = session.guest_pid().expect("guest");
-        let files = install.files_dir().to_path_buf();
-        drop(session);
-        wait_for_exit(gateway).await;
-        wait_for_exit(guest).await;
-        drop(install);
-        assert!(
-            session_dirs_under(&files).is_empty(),
-            "cycle {i} leaked session dirs"
-        );
-        assert!(!process_alive(gateway) && !process_alive(guest));
+        finish_clean_session(&install, &listener, &format!("cycle-{i}")).await;
     }
-
-    let mut joins = Vec::new();
-    for i in 0..4 {
-        joins.push(tokio::spawn(async move {
-            let listener = Listener::bind(true).await;
-            let install = Install::new(listener.port);
-            let session = install.spawn().await;
-            open_session(&session).await;
-            let outcome = probe(&session, "connect", listener.port, &format!("par-{i}")).await;
-            assert_eq!(outcome["ok"], true, "parallel {i}: {outcome}");
-            let gateway = session.gateway_pid().expect("gateway");
-            let guest = session.guest_pid().expect("guest");
-            let files = install.files_dir().to_path_buf();
-            drop(session);
-            wait_for_exit(gateway).await;
-            wait_for_exit(guest).await;
-            drop(install);
-            assert!(session_dirs_under(&files).is_empty());
-        }));
-    }
-    for join in joins {
-        join.await.expect("parallel cycle");
-    }
+    tokio::join!(
+        finish_clean_session(&install, &listener, "par-0"),
+        finish_clean_session(&install, &listener, "par-1"),
+        finish_clean_session(&install, &listener, "par-2"),
+        finish_clean_session(&install, &listener, "par-3"),
+    );
+    assert!(
+        install.files_dir().is_dir(),
+        "installation parent was removed before the session-dir check"
+    );
+    assert!(
+        session_dirs_under(install.files_dir()).is_empty(),
+        "churn left session dirs under {}",
+        install.files_dir().display()
+    );
     if let (Some(before), Some(after)) = (fds_before, linux_fd_count()) {
         assert!(
             after <= before + 8,
@@ -441,6 +422,118 @@ async fn sequential_and_concurrent_spawn_cycles_do_not_leak() {
         );
     }
     step("20 sequential + 4 concurrent cycles left no session dirs or pids");
+    drop(install);
+}
+
+/// One spawn on a shared installation. The install stays alive so an empty
+/// session-dir listing means production cleanup removed the directory.
+async fn finish_clean_session(install: &Install, listener: &Listener, label: &str) {
+    let session = install.spawn().await;
+    open_session(&session).await;
+    let outcome = probe(&session, "connect", listener.port, label).await;
+    assert_eq!(outcome["ok"], true, "{label}: {outcome}");
+    let gateway = session.gateway_pid().expect("gateway");
+    let guest = session.guest_pid().expect("guest");
+    let tree = ProcessTree::capture();
+    let workerd = tree.pinned_workerd(gateway).unwrap_or_else(|| {
+        panic!(
+            "{label}: pinned workerd missing under gateway {gateway}\n{}",
+            tree.describe(gateway)
+        )
+    });
+    let descendant = guest_descendant(&session, guest, label).await;
+    assert!(process_alive(workerd), "{label}: pinned workerd {workerd}");
+    assert!(
+        process_alive(descendant),
+        "{label}: guest descendant {descendant}"
+    );
+    assert_ne!(workerd, gateway, "{label}: workerd pid is the supervisor");
+    assert_ne!(
+        descendant, guest,
+        "{label}: guest descendant pid is the supervisor"
+    );
+    let cgroup = linux_session_cgroup(guest).or_else(|| linux_session_cgroup(gateway));
+    #[cfg(windows)]
+    let sid = session.package_sid().map(str::to_string);
+    drop(session);
+    wait_for_exit(gateway).await;
+    wait_for_exit(guest).await;
+    wait_for_exit(workerd).await;
+    wait_for_exit(descendant).await;
+    assert!(
+        install.files_dir().is_dir(),
+        "{label}: installation parent disappeared"
+    );
+    let dirs = session_dirs_under(install.files_dir());
+    assert!(
+        dirs.is_empty(),
+        "{label} leaked session dirs under {}: {dirs:?}",
+        install.files_dir().display()
+    );
+    match cgroup {
+        Some(dir) => {
+            let deadline = Instant::now() + SETTLE_TIMEOUT;
+            while dir.exists() && Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let procs = std::fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
+            assert!(
+                !dir.exists(),
+                "{label}: cgroup {} remains with members:\n{procs}",
+                dir.display()
+            );
+        }
+        None => note_missing_cgroup(),
+    }
+    #[cfg(windows)]
+    if let Some(sid) = sid.as_deref() {
+        let plugin = install
+            .files_dir()
+            .join("plugins")
+            .join(ng_harness::PLUGIN_ID);
+        for path in [install.files_dir(), plugin.as_path()] {
+            let mentioned = bookclerk_sandbox::dacl_mentions_sid(path, sid)
+                .unwrap_or_else(|err| panic!("{label}: DACL read {}: {err}", path.display()));
+            assert!(
+                !mentioned,
+                "{label}: package SID {sid} remains on {}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Child of the guest supervisor. Unix `exec` replaces the jail, so the probe
+/// forks a `pause` sleeper. Windows keeps `bookclerk-jail` and the probe is
+/// already that child.
+async fn guest_descendant(session: &PluginSession, guest: u32, label: &str) -> u32 {
+    let tree = ProcessTree::capture();
+    if let Some(pid) = tree.live_descendant(guest) {
+        return pid;
+    }
+    let outcome = probe(session, "descendant", 0, "").await;
+    assert_eq!(outcome["ok"], true, "{label}: descendant probe {outcome}");
+    let pid = u32::try_from(outcome["pid"].as_u64().expect("descendant pid"))
+        .expect("descendant pid fits u32");
+    let tree = ProcessTree::capture();
+    assert!(
+        tree.descendants(guest).contains(&pid),
+        "{label}: sleeper {pid} is not under guest {guest}\n{}",
+        tree.describe(guest)
+    );
+    pid
+}
+
+fn note_missing_cgroup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    if ONCE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    eprintln!(
+        "native_gateway: delegated cgroup unavailable; process-group kill is the fallback \
+         and does not cover a descendant that calls setsid"
+    );
 }
 
 /// Required isolation must fail before either sibling starts when the outer

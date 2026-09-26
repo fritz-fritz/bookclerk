@@ -348,3 +348,219 @@ pub async fn open_session(session: &PluginSession) {
 pub fn step(message: &str) {
     eprintln!("native_gateway: {message}");
 }
+
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    name: String,
+}
+
+/// One snapshot of pid, parent, and executable name.
+pub struct ProcessTree {
+    procs: Vec<Proc>,
+}
+
+impl ProcessTree {
+    /// Capture the current process table.
+    pub fn capture() -> Self {
+        Self {
+            procs: capture_processes(),
+        }
+    }
+
+    /// Pids whose parent chain reaches `root`, excluding `root`.
+    pub fn descendants(&self, root: u32) -> Vec<u32> {
+        use std::collections::{HashMap, HashSet};
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for proc in &self.procs {
+            children.entry(proc.ppid).or_default().push(proc.pid);
+        }
+        let mut out = Vec::new();
+        let mut stack = children.get(&root).cloned().unwrap_or_default();
+        let mut seen = HashSet::new();
+        while let Some(pid) = stack.pop() {
+            if pid == root || !seen.insert(pid) {
+                continue;
+            }
+            out.push(pid);
+            if let Some(next) = children.get(&pid) {
+                stack.extend(next.iter().copied());
+            }
+        }
+        out
+    }
+
+    /// The pinned `workerd` binary under `root` (`workerd`, not `bookclerk-workerd`).
+    pub fn pinned_workerd(&self, root: u32) -> Option<u32> {
+        let descendants = self.descendants(root);
+        descendants.into_iter().find(|pid| {
+            self.procs
+                .iter()
+                .any(|proc| proc.pid == *pid && is_pinned_workerd_name(&proc.name))
+        })
+    }
+
+    /// First descendant of `root` that is still running.
+    pub fn live_descendant(&self, root: u32) -> Option<u32> {
+        self.descendants(root)
+            .into_iter()
+            .find(|pid| process_alive(*pid))
+    }
+
+    /// Text form of `root` and its descendants, for assertion failures.
+    pub fn describe(&self, root: u32) -> String {
+        let mut lines = vec![format!("root {root}")];
+        for pid in self.descendants(root) {
+            let name = self
+                .procs
+                .iter()
+                .find(|proc| proc.pid == pid)
+                .map(|proc| proc.name.as_str())
+                .unwrap_or("?");
+            lines.push(format!("  {pid} {name}"));
+        }
+        lines.join("\n")
+    }
+}
+
+fn is_pinned_workerd_name(name: &str) -> bool {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    base == "workerd" || base.eq_ignore_ascii_case("workerd.exe")
+}
+
+/// `bookclerk-session-*` cgroup leaf containing `pid`, when Linux delegated one.
+pub fn linux_session_cgroup(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+        for line in text.lines() {
+            let Some(path) = line.split(':').next_back() else {
+                continue;
+            };
+            if !path.contains("bookclerk-session-") {
+                continue;
+            }
+            let mut acc = PathBuf::from("/sys/fs/cgroup");
+            for part in path.trim_start_matches('/').split('/') {
+                if part.is_empty() {
+                    continue;
+                }
+                acc.push(part);
+                if part.starts_with("bookclerk-session-") {
+                    return Some(acc);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capture_processes() -> Vec<Proc> {
+    let mut out = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in dir.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Some(ppid) = linux_ppid(pid) else {
+            continue;
+        };
+        out.push(Proc {
+            pid,
+            ppid,
+            name: linux_exe_name(pid),
+        });
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_exe_name(pid: u32) -> String {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return String::new();
+    };
+    let first = bytes.split(|byte| *byte == 0).next().unwrap_or(&[]);
+    let text = String::from_utf8_lossy(first);
+    text.rsplit('/').next().unwrap_or("").to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn capture_processes() -> Vec<Proc> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,ppid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(pid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(ppid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let name = parts
+            .next()
+            .unwrap_or("")
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        out.push(Proc { pid, ppid, name });
+    }
+    out
+}
+
+#[cfg(windows)]
+fn capture_processes() -> Vec<Proc> {
+    let Ok(output) = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.ParentProcessId,$_.Name }",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.trim().splitn(3, '|');
+        let Some(pid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(ppid) = parts.next().and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let name = parts.next().unwrap_or("").to_string();
+        out.push(Proc { pid, ppid, name });
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn capture_processes() -> Vec<Proc> {
+    Vec::new()
+}
